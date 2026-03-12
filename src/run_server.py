@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch the fund engine with mock broker, sync to Supabase, and start gRPC server.
+"""Launch the fund engine with real market data, live analysis loop, and gRPC server.
 
 Usage:
     python run_server.py                          # uses .env or env vars
@@ -8,9 +8,7 @@ Usage:
 
 import os
 import sys
-import signal
-import threading
-import time
+import statistics
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -21,7 +19,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from fund.types import Fund, Instrument, WeeklyNAV
 from fund.mock_broker import MockBroker
-from fund.belief_synthesizer import BeliefSynthesizer
 from fund.universe import InvestmentUniverse
 from fund.journal import EventJournal
 from fund.thermo_metrics import ThermoMetrics
@@ -30,16 +27,20 @@ from fund.heartbeat import HealthMonitor
 from fund.supabase_sync import SupabaseSync, SupabaseConfig
 from fund.grpc_runner import run_server
 from fund.grpc_server import FundServiceServicer
+from fund.live_engine import LiveEngine
 
 
-# ── Seed data ────────────────────────────────────────────────────────────────
+# ── Portfolio definition ──────────────────────────────────────────────────────
 
-SEED_POSITIONS = {
-    "AAPL":  {"qty": Decimal("50"),  "avg": Decimal("178.50"), "current": Decimal("195.20")},
-    "MSFT":  {"qty": Decimal("30"),  "avg": Decimal("380.00"), "current": Decimal("415.60")},
-    "NVDA":  {"qty": Decimal("25"),  "avg": Decimal("450.00"), "current": Decimal("520.30")},
-    "GOOG":  {"qty": Decimal("15"),  "avg": Decimal("140.00"), "current": Decimal("155.80")},
-    "AMZN":  {"qty": Decimal("20"),  "avg": Decimal("175.00"), "current": Decimal("188.40")},
+PORTFOLIO_SYMBOLS = ["AAPL", "MSFT", "NVDA", "GOOG", "AMZN"]
+
+# Shares held (starting position — a year ago)
+HOLDINGS = {
+    "AAPL": 50,
+    "MSFT": 30,
+    "NVDA": 25,
+    "GOOG": 15,
+    "AMZN": 20,
 }
 
 SEED_INSTRUMENTS = [
@@ -52,55 +53,127 @@ SEED_INSTRUMENTS = [
     Instrument("META", "Meta Platforms", "equity", "Social graph + Reels monetisation", "birger", date(2025, 2, 1), 2),
 ]
 
+STARTING_CASH = Decimal("25000")
 
-def build_weekly_nav_history(fund_nav: Decimal, weeks: int = 12) -> list:
-    """Generate plausible weekly NAV history."""
+
+# ── Fetch real historical data ────────────────────────────────────────────────
+
+def fetch_real_weekly_history(symbols: dict, weeks: int = 52) -> tuple:
+    """Fetch real weekly closing prices for the past year and build NAV history.
+
+    Returns (nav_history, broker_with_current_prices)
+    """
+    import yfinance as yf
+
+    end_date = date.today()
+    start_date = end_date - timedelta(weeks=weeks + 1)
+
+    print(f"  Fetching {weeks} weeks of data ({start_date} → {end_date})...")
+
+    # Download all symbols at once for efficiency
+    tickers = " ".join(symbols.keys())
+    df = yf.download(tickers, start=start_date.isoformat(), end=end_date.isoformat(),
+                     interval="1wk", progress=False)
+
+    if df.empty:
+        print("  WARNING: No data from Yahoo Finance, falling back to mock")
+        return [], None
+
+    # Handle MultiIndex columns from yfinance
+    close = df["Close"]
+    if hasattr(close, "columns"):
+        # Multiple symbols
+        pass
+    else:
+        # Single symbol edge case
+        close = df[["Close"]]
+        close.columns = [list(symbols.keys())[0]]
+
+    # Build weekly NAV history from real prices
     history = []
-    nav = float(fund_nav) * 0.92  # start ~8% lower
-    hwm = nav
-    today = date.today()
-    start = today - timedelta(weeks=weeks)
+    cash = float(STARTING_CASH)
+    prev_nav = None
+    hwm = 0.0
 
-    for i in range(weeks):
-        week_date = start + timedelta(weeks=i)
-        # Simulate gentle upward drift with noise
-        import random
-        random.seed(42 + i)
-        weekly_return = random.gauss(0.008, 0.02)  # ~0.8% mean, 2% vol
-        nav *= (1 + weekly_return)
+    for i, (idx, row) in enumerate(close.iterrows()):
+        week_date = idx.date() if hasattr(idx, 'date') else idx
+
+        # Calculate portfolio value
+        portfolio_value = cash
+        valid_prices = 0
+        for sym, qty in symbols.items():
+            price = row.get(sym)
+            if price is not None and not (hasattr(price, '__float__') and price != price):  # NaN check
+                portfolio_value += float(price) * qty
+                valid_prices += 1
+
+        if valid_prices == 0:
+            continue
+
+        nav = portfolio_value
         hwm = max(hwm, nav)
-        units = float(fund_nav) / 100  # ~stable units
+        units = 1000.0  # fixed units
 
-        benchmarks = {
-            "SPY": round(random.gauss(0.005, 0.015) * (i + 1), 4),
-            "QQQ": round(random.gauss(0.007, 0.02) * (i + 1), 4),
-        }
+        weekly_return = (nav - prev_nav) / prev_nav if prev_nav and prev_nav > 0 else 0.0
+        prev_nav = nav
 
         history.append(WeeklyNAV(
             date=week_date,
             nav=Decimal(str(round(nav, 2))),
             nav_per_unit=Decimal(str(round(nav / units, 4))),
-            gross_return_pct=round(weekly_return * 100, 2),
-            net_return_pct=round(weekly_return * 100 - 0.04, 2),  # ~2% annual mgmt
+            gross_return_pct=round(weekly_return, 4),
+            net_return_pct=round(weekly_return - 0.02 / 52, 4),  # ~2% annual mgmt
             mgmt_fee_accrued=Decimal(str(round(nav * 0.02 / 52, 2))),
             perf_fee_accrued=Decimal("0"),
             high_water_mark=Decimal(str(round(hwm, 2))),
-            clarity_score=round(55 + i * 1.5 + random.gauss(0, 5), 1),
-            opportunity_score=round(45 + i * 1.2 + random.gauss(0, 8), 1),
-            capture_rate=round(0.6 + random.gauss(0, 0.1), 2),
-            market_health="green" if i > 4 else "yellow",
-            momentum="rising" if weekly_return > 0.005 else "steady",
-            benchmarks=benchmarks,
-            narrative_summary=f"Week {i+1}: Fund returned {weekly_return*100:.1f}%. "
-                              f"Clarity improving as conviction builds across positions.",
+            market_health="green" if weekly_return > 0 else "yellow" if weekly_return > -0.02 else "red",
+            momentum="rising" if weekly_return > 0.005 else "falling" if weekly_return < -0.005 else "steady",
+            benchmarks={},
+            narrative_summary="",
         ))
 
-    return history
+    print(f"  Got {len(history)} weeks of real NAV data")
+
+    # Get latest prices for broker
+    latest_prices = {}
+    if not close.empty:
+        last_row = close.iloc[-1]
+        for sym in symbols:
+            price = last_row.get(sym)
+            if price is not None and price == price:  # NaN check
+                latest_prices[sym] = float(price)
+
+    return history, latest_prices
+
+
+def fetch_spy_weekly(weeks: int = 52) -> dict:
+    """Fetch SPY weekly returns for benchmark comparison."""
+    import yfinance as yf
+
+    end_date = date.today()
+    start_date = end_date - timedelta(weeks=weeks + 1)
+
+    df = yf.download("SPY", start=start_date.isoformat(), end=end_date.isoformat(),
+                     interval="1wk", progress=False)
+    if df.empty:
+        return {}
+
+    close = df["Close"]
+    spy_returns = {}
+    prev = None
+    for idx, val in close.items():
+        d = idx.date() if hasattr(idx, 'date') else idx
+        price = float(val) if hasattr(val, '__float__') else float(val.iloc[0]) if hasattr(val, 'iloc') else float(val)
+        if prev is not None:
+            spy_returns[d] = (price - prev) / prev
+        prev = price
+
+    return spy_returns
 
 
 def sync_to_supabase(supabase: SupabaseSync, fund: Fund, broker: MockBroker,
                      universe: InvestmentUniverse, nav_history: list,
-                     health: HealthMonitor, thermo: ThermoMetrics):
+                     health: HealthMonitor):
     """Push all fund state to Supabase for the web dashboard."""
     print("  Syncing fund snapshot...")
     account = broker.get_account()
@@ -134,12 +207,12 @@ def sync_to_supabase(supabase: SupabaseSync, fund: Fund, broker: MockBroker,
 
     print("  Syncing engine heartbeat...")
     heartbeat = health.create_heartbeat(
-        alpaca_connected=True,
-        last_trade=datetime.now() - timedelta(hours=2),
+        alpaca_connected=False,
+        last_trade=None,
         active_positions=len(positions),
-        current_regime="accumulation",
-        next_action="Weekly rebalance check",
-        next_action_at=datetime.now() + timedelta(hours=4),
+        current_regime="live_analysis",
+        next_action="Next analysis tick",
+        next_action_at=datetime.now() + timedelta(minutes=5),
     )
     supabase.push_heartbeat({
         "id": "singleton",
@@ -153,7 +226,11 @@ def sync_to_supabase(supabase: SupabaseSync, fund: Fund, broker: MockBroker,
     })
 
     print("  Syncing weekly NAV history...")
+    # Fetch SPY for benchmark
+    spy_returns = fetch_spy_weekly()
+
     for nav in nav_history:
+        spy_ret = spy_returns.get(nav.date, 0)
         try:
             supabase._client.table("weekly_nav").upsert({
                 "id": str(uuid4()),
@@ -165,12 +242,12 @@ def sync_to_supabase(supabase: SupabaseSync, fund: Fund, broker: MockBroker,
                 "mgmt_fee_accrued": float(nav.mgmt_fee_accrued),
                 "perf_fee_accrued": float(nav.perf_fee_accrued),
                 "high_water_mark": float(nav.high_water_mark),
-                "clarity_score": nav.clarity_score,
-                "opportunity_score": nav.opportunity_score,
-                "capture_rate": nav.capture_rate,
+                "clarity_score": 0,
+                "opportunity_score": 0,
+                "capture_rate": 0,
                 "market_health": nav.market_health,
                 "momentum": nav.momentum,
-                "benchmarks": nav.benchmarks,
+                "benchmarks": {"SPY": round(spy_ret, 4)},
                 "narrative_summary": nav.narrative_summary,
             }, on_conflict="date").execute()
         except Exception as e:
@@ -195,7 +272,7 @@ def sync_to_supabase(supabase: SupabaseSync, fund: Fund, broker: MockBroker,
 
 def main():
     print("=" * 60)
-    print("  FUND ENGINE - Development Server")
+    print("  FUND ENGINE - Live Analysis Server")
     print("=" * 60)
 
     # ── Load env ──────────────────────────────────────────────
@@ -212,18 +289,35 @@ def main():
     supabase_url = os.environ.get("NEXT_PUBLIC_SUPABASE_URL")
     supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 
-    # ── Build fund engine ─────────────────────────────────────
-    print("\n  Building fund engine...")
+    # ── Fetch real market data ─────────────────────────────────
+    print("\n  Fetching real market data from Yahoo Finance...")
 
-    broker = MockBroker(cash=Decimal("25000"))
-    for symbol, data in SEED_POSITIONS.items():
-        broker.seed_position(symbol, data["qty"], data["avg"])
-        broker.seed_price(symbol, data["current"])
+    nav_history, latest_prices = fetch_real_weekly_history(HOLDINGS)
+
+    if not nav_history or not latest_prices:
+        print("  FATAL: Could not fetch market data. Check your internet connection.")
+        sys.exit(1)
+
+    # ── Build fund engine with real prices ─────────────────────
+    print("\n  Building fund engine with real prices...")
+
+    # Use first week's prices as avg entry (simulating buying a year ago)
+    first_nav = nav_history[0]
+    latest_nav = nav_history[-1]
+
+    broker = MockBroker(cash=STARTING_CASH)
+    for symbol, qty in HOLDINGS.items():
+        current = latest_prices.get(symbol, 100)
+        # Entry price = current price adjusted by portfolio return
+        total_return = float(latest_nav.nav) / float(first_nav.nav) if float(first_nav.nav) > 0 else 1.0
+        entry_price = current / total_return
+        broker.seed_position(symbol, Decimal(str(qty)), Decimal(str(round(entry_price, 2))))
+        broker.seed_price(symbol, Decimal(str(round(current, 2))))
 
     fund = Fund(
         nav=broker.get_account().equity,
         units_outstanding=Decimal("1000"),
-        high_water_mark=broker.get_account().equity,
+        high_water_mark=Decimal(str(float(latest_nav.high_water_mark))),
         inception_date=date(2025, 1, 6),
     )
 
@@ -232,11 +326,12 @@ def main():
         universe.add(inst)
 
     journal = EventJournal(journal_dir="/tmp/fund-journals")
-    thermo = ThermoMetrics()
-    benchmarks = BenchmarkEngine()
     health = HealthMonitor()
+
     openai_key = os.environ.get("OPENAI_API_KEY", "")
+    synthesizer = None
     if openai_key:
+        from fund.belief_synthesizer import BeliefSynthesizer
         synthesizer = BeliefSynthesizer(api_key=openai_key, model="gpt-4o-mini")
         print("  Synthesizer:     OpenAI gpt-4o-mini (cached)")
     else:
@@ -244,31 +339,41 @@ def main():
         synthesizer = MockSynthesizer()
         print("  Synthesizer:     Mock (no OPENAI_API_KEY set)")
 
-    nav_history = build_weekly_nav_history(fund.nav)
-
     account = broker.get_account()
-    print(f"  Fund NAV:        ${float(fund.nav):,.2f}")
-    print(f"  Cash:            ${float(account.cash):,.2f}")
-    print(f"  Positions:       {len(broker.get_positions())}")
+    print(f"\n  Fund NAV:        ${float(fund.nav):,.2f}")
+    print(f"  Cash:            ${float(STARTING_CASH):,.2f}")
+    print(f"  Positions:       {len(HOLDINGS)} ({', '.join(PORTFOLIO_SYMBOLS)})")
     print(f"  NAV/unit:        ${float(fund.nav_per_unit):,.4f}")
-    print(f"  Universe:        {len(universe.instruments)} instruments")
+    print(f"  52wk data:       {len(nav_history)} weeks")
+    print(f"  1yr return:      {((float(latest_nav.nav) / float(first_nav.nav)) - 1) * 100:+.1f}%")
 
     # ── Sync to Supabase ──────────────────────────────────────
+    supabase = None
     if supabase_url and supabase_key and supabase_key != "your-service-role-key":
         print(f"\n  Syncing to Supabase ({supabase_url})...")
         try:
             supabase = SupabaseSync(SupabaseConfig(url=supabase_url, key=supabase_key))
-            sync_to_supabase(supabase, fund, broker, universe, nav_history, health, thermo)
+            sync_to_supabase(supabase, fund, broker, universe, nav_history, health)
             print("  Supabase sync complete!")
         except Exception as e:
             print(f"  Warning: Supabase sync failed: {e}")
-            print("  (Server will still start — web dashboard may show stale data)")
     else:
         print("\n  Supabase sync skipped (no SUPABASE_SERVICE_ROLE_KEY set)")
-        print("  Set it in web/.env.local to enable dashboard data sync")
+
+    # ── Start live engine (continuous analysis loop) ──────────
+    live = LiveEngine(
+        symbols=PORTFOLIO_SYMBOLS,
+        fund=fund,
+        supabase=supabase,
+        synthesizer=synthesizer,
+        interval_seconds=300,  # every 5 minutes
+    )
+    live.start()
 
     # ── Build gRPC servicer ───────────────────────────────────
-    # Wrap HealthMonitor so the gRPC server can call create_heartbeat() without args
+    thermo = ThermoMetrics()
+    benchmarks = BenchmarkEngine()
+
     class _HealthAdapter:
         def __init__(self, monitor, broker):
             self._monitor = monitor
@@ -277,15 +382,14 @@ def main():
         def create_heartbeat(self):
             positions = self._broker.get_positions()
             return self._monitor.create_heartbeat(
-                alpaca_connected=True,
-                last_trade=datetime.now() - timedelta(hours=2),
+                alpaca_connected=False,
+                last_trade=None,
                 active_positions=len(positions),
-                current_regime="accumulation",
-                next_action="Weekly rebalance check",
-                next_action_at=datetime.now() + timedelta(hours=4),
+                current_regime=live.current_regime,
+                next_action="Live analysis running",
+                next_action_at=datetime.now() + timedelta(minutes=5),
             )
 
-    # Wrap ThermoMetrics so gRPC can call without args
     class _ThermoAdapter:
         def __init__(self, thermo):
             self._thermo = thermo
@@ -311,20 +415,15 @@ def main():
             m = self.momentum()
             return self._thermo.interpret(c, o, h, m)
 
-    # Wrap BenchmarkEngine so gRPC can call without args
     class _BenchmarkAdapter:
         def compare(self):
             return {"SPY": 0.052, "QQQ": 0.071}
-
         def equal_weight_return(self):
             return 0.065
-
         def best_daily_pick_return(self):
             return 0.12
-
         def random_portfolio_median(self):
             return 0.04
-
         def capture_rate(self):
             return 0.76
 
@@ -344,16 +443,18 @@ def main():
     # ── Start gRPC server ─────────────────────────────────────
     port = int(os.environ.get("GRPC_PORT", "50051"))
     print(f"\n  Starting gRPC server on port {port}...")
-    print(f"  Dashboard: http://localhost:3000")
+    print(f"  Live analysis:   every 5 minutes")
+    print(f"  Dashboard:       http://localhost:3000")
     print(f"  Press Ctrl+C to stop\n")
     print("=" * 60)
 
-    journal.log("engine_start", "Fund engine started in development mode")
+    journal.log("engine_start", "Fund engine started with real market data")
 
     try:
         run_server(servicer, port=port)
     except KeyboardInterrupt:
         print("\n  Shutting down...")
+        live.stop()
 
 
 if __name__ == "__main__":
