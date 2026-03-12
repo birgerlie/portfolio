@@ -34,7 +34,7 @@ def _to_struct(d):
 class FundServiceServicer(fund_service_pb2_grpc.FundServiceServicer):
     """Implements all FundService RPCs by delegating to fund engine components."""
 
-    def __init__(self, fund, members, broker, universe, journal, thermo, benchmarks, health):
+    def __init__(self, fund, members, broker, universe, journal, thermo, benchmarks, health, belief_synthesizer=None):
         self._fund = fund
         self._members = members  # dict of member_id -> Member
         self._broker = broker  # AlpacaBroker
@@ -43,6 +43,9 @@ class FundServiceServicer(fund_service_pb2_grpc.FundServiceServicer):
         self._thermo = thermo  # ThermoMetrics
         self._benchmarks = benchmarks  # BenchmarkEngine
         self._health = health  # HealthMonitor
+        self._synthesizer = belief_synthesizer
+        self._epistemic_beliefs = {}   # symbol -> Belief; set by engine
+        self._last_positions = {}      # symbol -> dict; set by engine
         self._event_queue = queue.Queue()
         self._nav_history = []  # List[WeeklyNAV], populated by engine
 
@@ -285,11 +288,39 @@ class FundServiceServicer(fund_service_pb2_grpc.FundServiceServicer):
         )
 
     def GetBeliefNarrative(self, request, context):
-        """Returns belief state. Full OpenAI synthesis added in sub-project 5."""
-        return fund_service_pb2.BeliefReport(
-            beliefs=[],
-            synthesis="Belief synthesis will be available after OpenAI integration.",
-        )
+        """Return belief state with optional OpenAI synthesis."""
+        entries = []
+        for symbol, b in self._epistemic_beliefs.items():
+            entries.append(fund_service_pb2.BeliefEntry(
+                symbol=b.symbol,
+                probability=b.probability,
+                direction=b.belief_type.value,
+                confirmations=b.confirmations,
+                contradictions=b.contradictions,
+                credibility_weighted=b.probability,  # raw probability as proxy
+            ))
+
+        synthesis = "Belief synthesis unavailable — no synthesizer configured."
+        if self._synthesizer and entries:
+            thermo = {
+                "clarity_score": self._thermo.clarity_score(),
+                "market_health": self._thermo.market_health(),
+            }
+            regime = getattr(self._health.create_heartbeat(), "current_regime", "unknown")
+            synthesis = self._synthesizer.synthesize_weekly(
+                beliefs=list(self._epistemic_beliefs.values()),
+                positions=self._last_positions,
+                thermo_state=thermo,
+                regime=regime,
+            )
+            # Log to journal
+            self._journal.log(
+                entry_type="belief_narrative",
+                summary=synthesis[:120],
+                data={"full_text": synthesis},
+            )
+
+        return fund_service_pb2.BeliefReport(beliefs=entries, synthesis=synthesis)
 
     def GetDecisionLog(self, request, context):
         """Server-streaming: yield today's journal entries as decisions."""

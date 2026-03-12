@@ -28,6 +28,7 @@ from fund.alpaca_broker import AlpacaBroker, AlpacaConfig, BrokerAccount, Broker
 from fund.order_executor import OrderExecutor, ExecutedOrder
 from fund.position_sync import PositionSync, SyncResult
 from fund.grpc_server import FundServiceServicer
+from fund.belief_synthesizer import BeliefSynthesizer
 from fund.grpc_runner import create_server, run_server
 from fund.supabase_sync import SupabaseSync, SupabaseConfig
 
@@ -41,5 +42,6 @@ __all__ = [
     "OrderExecutor", "ExecutedOrder",
     "PositionSync", "SyncResult",
     "FundServiceServicer", "create_server", "run_server",
+    "BeliefSynthesizer",
     "SupabaseSync", "SupabaseConfig",
 ]
