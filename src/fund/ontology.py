@@ -310,6 +310,17 @@ def build_ontology(use_network: bool = True) -> List[Triple]:
             if sector_id:
                 triples.append(Triple(industry_id, "part_of", sector_id, 1.0))
 
+    # ── Ticker observable properties ──────────────────────────────────────
+    # Each ticker has observable attributes that SiliconDB can track beliefs on
+    OBSERVABLES = ["price", "volume", "return", "volatility", "market_cap", "momentum", "rsi"]
+    for symbol in all_tickers:
+        triples.append(Triple(symbol, "is_a", "instrument", 1.0))
+        for obs in OBSERVABLES:
+            node_id = f"{symbol}:{obs}"
+            triples.append(Triple(symbol, f"has_{obs}", node_id, 1.0))
+            triples.append(Triple(node_id, "property_of", symbol, 1.0))
+            triples.append(Triple(node_id, "is_a", obs, 1.0))
+
     # ── Index membership ─────────────────────────────────────────────────
     # Equal weight since we don't have exact weights for all 500+ stocks
     if sp500:

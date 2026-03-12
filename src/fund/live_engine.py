@@ -130,17 +130,28 @@ class SiliconDBBeliefBridge:
             # e.g., if "high_growth" with 0.8 confidence → confirmed observation
             confirmed = btype in ("high_growth", "stable")
 
+            # Record on the ontology property nodes
             self._client.record_observation(
-                external_id=f"belief:{symbol}:return",
+                external_id=f"{symbol}:return",
                 confirmed=confirmed,
                 source=source,
             )
 
-            # Also record momentum observation
+            # Volatility observation
+            if len(returns) >= 10:
+                vol = statistics.stdev(returns[-20:]) if len(returns) >= 20 else statistics.stdev(returns)
+                low_vol = vol < 0.02
+                self._client.record_observation(
+                    external_id=f"{symbol}:volatility",
+                    confirmed=low_vol,  # confirmed = low volatility (stable)
+                    source=source,
+                )
+
+            # Momentum observation
             if len(returns) >= 5:
                 recent_positive = sum(1 for r in returns[-5:] if r > 0) >= 3
                 self._client.record_observation(
-                    external_id=f"belief:{symbol}:momentum",
+                    external_id=f"{symbol}:momentum",
                     confirmed=recent_positive,
                     source=source,
                 )
@@ -155,14 +166,14 @@ class SiliconDBBeliefBridge:
 
         try:
             # Add co-occurrences for portfolio stocks (they're related)
-            ids = [f"belief:{s}:return" for s in symbols]
+            ids = [f"{s}:return" for s in symbols]
             self._client.add_cooccurrences(ids, session_id=f"portfolio-{date.today()}")
 
             # Propagate from each symbol
             for symbol in symbols:
                 try:
                     self._client.propagate(
-                        external_id=f"belief:{symbol}:return",
+                        external_id=f"{symbol}:return",
                         confidence=0.7,
                         decay=0.5,
                     )
@@ -205,7 +216,7 @@ class SiliconDBBeliefBridge:
             return None
 
         try:
-            ids = [f"belief:{s}:return" for s in symbols]
+            ids = [f"{s}:return" for s in symbols]
             return self._client.snapshot_beliefs(ids, snapshot_id=f"portfolio-{date.today()}")
         except Exception as e:
             logger.warning("Belief snapshot failed: %s", e)
@@ -217,7 +228,7 @@ class SiliconDBBeliefBridge:
             return []
 
         try:
-            return self._client.get_belief_history(f"belief:{symbol}:return")
+            return self._client.get_belief_history(f"{symbol}:return")
         except Exception as e:
             logger.warning("Belief history query failed: %s", e)
             return []
