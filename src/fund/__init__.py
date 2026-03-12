@@ -24,6 +24,9 @@ from fund.thermo_metrics import ThermoMetrics
 from fund.heartbeat import HealthMonitor
 from fund.snapshot import SnapshotBuilder
 from fund.journal import JournalEntry, DailyJournal, EventJournal
+from fund.alpaca_broker import AlpacaBroker, AlpacaConfig, BrokerAccount, BrokerPosition, BrokerOrder
+from fund.order_executor import OrderExecutor, ExecutedOrder
+from fund.position_sync import PositionSync, SyncResult
 
 __all__ = [
     "Fund", "Member", "Transaction", "TransactionType", "TransactionStatus",
@@ -31,4 +34,7 @@ __all__ = [
     "NAVCalculator", "FeeEngine", "UnitLedger", "InvestmentUniverse",
     "BenchmarkEngine", "ThermoMetrics", "HealthMonitor", "SnapshotBuilder",
     "JournalEntry", "DailyJournal", "EventJournal",
+    "AlpacaBroker", "AlpacaConfig", "BrokerAccount", "BrokerPosition", "BrokerOrder",
+    "OrderExecutor", "ExecutedOrder",
+    "PositionSync", "SyncResult",
 ]
