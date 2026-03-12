@@ -1,0 +1,230 @@
+syntax = "proto3";
+
+package fund;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/struct.proto";
+
+// ── Request/Response Messages ──────────────────────────────
+
+message TimeRange {
+  google.protobuf.Timestamp start = 1;
+  google.protobuf.Timestamp end = 2;
+}
+
+message MemberId {
+  string id = 1;
+}
+
+message WhatIfRequest {
+  string member_id = 1;
+  double amount = 2;  // hypothetical subscription amount
+}
+
+// ── Fund State ─────────────────────────────────────────────
+
+message FundState {
+  double nav = 1;
+  double nav_per_unit = 2;
+  double units_outstanding = 3;
+  double high_water_mark = 4;
+  double cash = 5;
+  string inception_date = 6;
+  EngineStatus engine_status = 7;
+}
+
+message EngineStatus {
+  string status = 1;  // running / degraded / stopped
+  bool alpaca_connected = 2;
+  google.protobuf.Timestamp last_trade = 3;
+  int32 active_positions = 4;
+  string current_regime = 5;
+  string next_action = 6;
+  google.protobuf.Timestamp next_action_at = 7;
+  google.protobuf.Timestamp timestamp = 8;
+}
+
+// ── NAV History ────────────────────────────────────────────
+
+message WeeklyNAVRecord {
+  string date = 1;
+  double nav = 2;
+  double nav_per_unit = 3;
+  double gross_return_pct = 4;
+  double net_return_pct = 5;
+  double mgmt_fee_accrued = 6;
+  double perf_fee_accrued = 7;
+  double high_water_mark = 8;
+  ThermoSnapshot thermo = 9;
+  map<string, double> benchmarks = 10;
+  string narrative_summary = 11;
+}
+
+// ── Member ─────────────────────────────────────────────────
+
+message MemberPosition {
+  string member_id = 1;
+  string name = 2;
+  double units = 3;
+  double cost_basis = 4;
+  double current_value = 5;
+  double return_pct = 6;
+  string lock_up_until = 7;
+}
+
+message WhatIfResponse {
+  double units_received = 1;
+  double nav_per_unit = 2;
+  double projected_value_at_10pct = 3;
+  double projected_value_at_neg10pct = 4;
+}
+
+// ── Positions & Universe ───────────────────────────────────
+
+message PositionInfo {
+  string symbol = 1;
+  double quantity = 2;
+  double market_value = 3;
+  double avg_entry_price = 4;
+  double current_price = 5;
+  double unrealized_pl = 6;
+  double unrealized_pl_pct = 7;
+  double allocation_pct = 8;
+}
+
+message Positions {
+  repeated PositionInfo positions = 1;
+  double total_value = 2;
+  double cash = 3;
+}
+
+message InstrumentInfo {
+  string symbol = 1;
+  string name = 2;
+  string asset_class = 3;
+  string thesis = 4;
+  string proposed_by = 5;
+  string added_date = 6;
+  int32 votes_for = 7;
+}
+
+message InvestmentUniverseMsg {
+  repeated InstrumentInfo instruments = 1;
+  int32 max_size = 2;
+}
+
+// ── Benchmarks ─────────────────────────────────────────────
+
+message BenchmarkData {
+  map<string, double> standard_benchmarks = 1;  // SPY, QQQ, OBX
+  double equal_weight_return = 2;
+  double no_conviction_return = 3;
+  double best_possible_return = 4;
+  double random_avg_return = 5;
+  double capture_rate = 6;
+  double alpha = 7;
+}
+
+message UniverseComparison {
+  BenchmarkData benchmarks = 1;
+  string narrative = 2;  // "We captured 76% of available opportunity"
+}
+
+// ── Thermodynamic Metrics ──────────────────────────────────
+
+message ThermoSnapshot {
+  double clarity_score = 1;       // entropy → 0-100%
+  double opportunity_score = 2;   // portfolio potential Φ → 0-100%
+  double capture_rate = 3;        // actual vs potential
+  string market_health = 4;       // green/yellow/red
+  string momentum = 5;            // rising/steady/falling
+  string interpretation = 6;      // plain language
+}
+
+// ── Belief & Decisions ─────────────────────────────────────
+
+message BeliefReport {
+  repeated BeliefEntry beliefs = 1;
+  string synthesis = 2;  // OpenAI-generated narrative
+}
+
+message BeliefEntry {
+  string symbol = 1;
+  double probability = 2;
+  string direction = 3;  // bullish/bearish/neutral
+  int32 confirmations = 4;
+  int32 contradictions = 5;
+  double credibility_weighted = 6;
+}
+
+message Decision {
+  google.protobuf.Timestamp timestamp = 1;
+  string type = 2;  // regime_change, trade_executed, belief_update, etc.
+  string summary = 3;
+  google.protobuf.Struct data = 4;
+}
+
+// ── Events ─────────────────────────────────────────────────
+
+message FundEvent {
+  google.protobuf.Timestamp timestamp = 1;
+  string event_type = 2;
+  string title = 3;
+  string description = 4;
+  string severity = 5;  // info, warning, critical
+  google.protobuf.Struct metadata = 6;
+}
+
+// ── Journal ────────────────────────────────────────────────
+
+message JournalDate {
+  string date = 1;  // YYYY-MM-DD
+}
+
+message DailyJournalMsg {
+  string date = 1;
+  repeated Decision entries = 2;
+  string regime_summary = 3;
+  int32 trades_executed = 4;
+  double nav_change_pct = 5;
+  google.protobuf.Struct belief_snapshot = 6;
+  google.protobuf.Struct thermo_snapshot = 7;
+}
+
+// ── Service ────────────────────────────────────────────────
+
+service FundService {
+  // Fund state
+  rpc GetCurrentState(google.protobuf.Empty) returns (FundState);
+  rpc GetWeeklyNAVHistory(TimeRange) returns (stream WeeklyNAVRecord);
+
+  // Member
+  rpc GetMemberPosition(MemberId) returns (MemberPosition);
+  rpc GetMemberWhatIf(WhatIfRequest) returns (WhatIfResponse);
+
+  // Positions & universe
+  rpc GetPositions(google.protobuf.Empty) returns (Positions);
+  rpc GetUniverse(google.protobuf.Empty) returns (InvestmentUniverseMsg);
+
+  // Benchmarks
+  rpc GetBenchmarkComparison(TimeRange) returns (BenchmarkData);
+  rpc GetAlternativeUniverses(TimeRange) returns (UniverseComparison);
+
+  // Thermodynamic metrics
+  rpc GetThermoMetrics(google.protobuf.Empty) returns (ThermoSnapshot);
+  rpc StreamThermoMetrics(google.protobuf.Empty) returns (stream ThermoSnapshot);
+
+  // Belief narratives
+  rpc GetBeliefNarrative(TimeRange) returns (BeliefReport);
+
+  // Decisions / journal
+  rpc GetDecisionLog(TimeRange) returns (stream Decision);
+  rpc GetDailyJournal(JournalDate) returns (DailyJournalMsg);
+
+  // Events & notifications
+  rpc StreamEvents(google.protobuf.Empty) returns (stream FundEvent);
+
+  // Heartbeat (cloud polls or Mac pushes)
+  rpc GetEngineStatus(google.protobuf.Empty) returns (EngineStatus);
+}
