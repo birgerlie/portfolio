@@ -23,10 +23,12 @@ from fund.benchmarks import BenchmarkEngine
 from fund.thermo_metrics import ThermoMetrics
 from fund.heartbeat import HealthMonitor
 from fund.snapshot import SnapshotBuilder
+from fund.journal import JournalEntry, DailyJournal, EventJournal
 
 __all__ = [
     "Fund", "Member", "Transaction", "TransactionType", "TransactionStatus",
     "FeeBreakdown", "Instrument", "EngineHealth", "WeeklyNAV", "MarketHealth", "Momentum",
     "NAVCalculator", "FeeEngine", "UnitLedger", "InvestmentUniverse",
     "BenchmarkEngine", "ThermoMetrics", "HealthMonitor", "SnapshotBuilder",
+    "JournalEntry", "DailyJournal", "EventJournal",
 ]
