@@ -1,5 +1,7 @@
 """gRPC server implementing the FundService."""
 
+import queue
+import time
 from datetime import datetime
 from decimal import Decimal
 
@@ -41,6 +43,8 @@ class FundServiceServicer(fund_service_pb2_grpc.FundServiceServicer):
         self._thermo = thermo  # ThermoMetrics
         self._benchmarks = benchmarks  # BenchmarkEngine
         self._health = health  # HealthMonitor
+        self._event_queue = queue.Queue()
+        self._nav_history = []  # List[WeeklyNAV], populated by engine
 
     def GetCurrentState(self, request, context):
         account = self._broker.get_account()
@@ -199,3 +203,101 @@ class FundServiceServicer(fund_service_pb2_grpc.FundServiceServicer):
             belief_snapshot=_to_struct(daily.belief_snapshot),
             thermo_snapshot=_to_struct(daily.thermo_snapshot),
         )
+
+    def push_event(self, event_type, title, severity="info", metadata=None):
+        """Push an event to the stream queue (called by engine components)."""
+        event = fund_service_pb2.FundEvent(
+            timestamp=_to_timestamp(datetime.now()),
+            event_type=event_type,
+            title=title,
+            description=title,
+            severity=severity,
+            metadata=_to_struct(metadata or {}),
+        )
+        self._event_queue.put(event)
+
+    def _drain_events(self):
+        """Drain all queued events (for testing)."""
+        events = []
+        while not self._event_queue.empty():
+            events.append(self._event_queue.get_nowait())
+        return events
+
+    def StreamEvents(self, request, context):
+        """Server-streaming RPC that yields events as they occur."""
+        while context.is_active():
+            try:
+                event = self._event_queue.get(timeout=1.0)
+                yield event
+            except Exception:
+                continue
+
+    def StreamThermoMetrics(self, request, context):
+        """Server-streaming RPC that yields thermo snapshots periodically."""
+        while context.is_active():
+            snapshot = self.GetThermoMetrics(request, context)
+            yield snapshot
+            time.sleep(5)  # Push every 5 seconds
+
+    def GetWeeklyNAVHistory(self, request, context):
+        """Server-streaming: yield historical WeeklyNAV records."""
+        for nav in self._nav_history:
+            thermo = fund_service_pb2.ThermoSnapshot(
+                clarity_score=nav.clarity_score,
+                opportunity_score=nav.opportunity_score,
+                capture_rate=nav.capture_rate,
+                market_health=nav.market_health,
+                momentum=nav.momentum,
+            )
+            yield fund_service_pb2.WeeklyNAVRecord(
+                date=str(nav.date),
+                nav=float(nav.nav),
+                nav_per_unit=float(nav.nav_per_unit),
+                gross_return_pct=nav.gross_return_pct,
+                net_return_pct=nav.net_return_pct,
+                mgmt_fee_accrued=float(nav.mgmt_fee_accrued),
+                perf_fee_accrued=float(nav.perf_fee_accrued),
+                high_water_mark=float(nav.high_water_mark),
+                thermo=thermo,
+                benchmarks=nav.benchmarks,
+                narrative_summary=nav.narrative_summary,
+            )
+
+    def GetBenchmarkComparison(self, request, context):
+        standard = self._benchmarks.compare()
+        return fund_service_pb2.BenchmarkData(
+            standard_benchmarks=standard,
+            equal_weight_return=self._benchmarks.equal_weight_return(),
+            no_conviction_return=0.0,  # placeholder
+            best_possible_return=self._benchmarks.best_daily_pick_return(),
+            random_avg_return=self._benchmarks.random_portfolio_median(),
+            capture_rate=self._benchmarks.capture_rate(),
+            alpha=0.0,  # computed from standard benchmarks
+        )
+
+    def GetAlternativeUniverses(self, request, context):
+        benchmarks = self.GetBenchmarkComparison(request, context)
+        cr = benchmarks.capture_rate
+        narrative = f"We captured {cr:.0%} of available opportunity."
+        return fund_service_pb2.UniverseComparison(
+            benchmarks=benchmarks,
+            narrative=narrative,
+        )
+
+    def GetBeliefNarrative(self, request, context):
+        """Returns belief state. Full OpenAI synthesis added in sub-project 5."""
+        return fund_service_pb2.BeliefReport(
+            beliefs=[],
+            synthesis="Belief synthesis will be available after OpenAI integration.",
+        )
+
+    def GetDecisionLog(self, request, context):
+        """Server-streaming: yield today's journal entries as decisions."""
+        for e in self._journal.today.entries:
+            ts = e.timestamp if isinstance(e.timestamp, datetime) else datetime.now()
+            yield fund_service_pb2.Decision(
+                timestamp=_to_timestamp(ts),
+                type=e.entry_type,
+                summary=e.summary,
+                data=_to_struct(e.data),
+            )

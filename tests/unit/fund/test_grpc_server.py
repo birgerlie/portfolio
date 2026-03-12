@@ -1,5 +1,7 @@
 """Tests for the gRPC server servicer."""
 
+import threading
+import time
 from datetime import date, datetime
 from decimal import Decimal
 from unittest.mock import MagicMock
@@ -168,3 +170,149 @@ class TestGetDailyJournal:
         assert response.trades_executed == 1
         assert response.regime_summary == "Bull all day"
         assert len(response.entries) == 1
+
+
+class TestGetWeeklyNAVHistory:
+    def test_returns_nav_records(self):
+        servicer = make_servicer()
+        servicer._nav_history = [
+            MagicMock(date=date(2026, 3, 5), nav=Decimal("98000"), nav_per_unit=Decimal("103"),
+                      gross_return_pct=0.01, net_return_pct=0.008, mgmt_fee_accrued=Decimal("38"),
+                      perf_fee_accrued=Decimal("0"), high_water_mark=Decimal("103"),
+                      clarity_score=0.75, opportunity_score=0.6, capture_rate=0.5,
+                      market_health="green", momentum="rising",
+                      benchmarks={"SPY": 0.005}, narrative_summary="Good week"),
+        ]
+
+        req = fund_service_pb2.TimeRange()
+        records = list(servicer.GetWeeklyNAVHistory(req, MockContext()))
+        assert len(records) == 1
+        assert records[0].nav == 98000.0
+        assert records[0].nav_per_unit == 103.0
+
+
+class TestGetBenchmarkComparison:
+    def test_returns_benchmark_data(self):
+        benchmarks = MagicMock()
+        benchmarks.compare.return_value = {"SPY": 0.05, "QQQ": 0.08}
+        benchmarks.equal_weight_return.return_value = 0.06
+        benchmarks.best_daily_pick_return.return_value = 0.12
+        benchmarks.random_portfolio_median.return_value = 0.04
+        benchmarks.capture_rate.return_value = 0.76
+
+        servicer = make_servicer(benchmarks=benchmarks)
+        req = fund_service_pb2.TimeRange()
+        response = servicer.GetBenchmarkComparison(req, MockContext())
+
+        assert response.capture_rate == 0.76
+        assert response.equal_weight_return == 0.06
+
+
+class TestGetDecisionLog:
+    def test_returns_decisions_from_journal(self):
+        journal = MagicMock()
+        journal.today = MagicMock(
+            entries=[
+                MagicMock(timestamp=datetime(2026, 3, 12, 10, 0), entry_type="trade_executed",
+                          summary="Bought NVDA", data={"symbol": "NVDA"}),
+                MagicMock(timestamp=datetime(2026, 3, 12, 11, 0), entry_type="regime_change",
+                          summary="Bull to Bear", data={}),
+            ]
+        )
+
+        servicer = make_servicer(journal=journal)
+        req = fund_service_pb2.TimeRange()
+        decisions = list(servicer.GetDecisionLog(req, MockContext()))
+
+        assert len(decisions) == 2
+        assert decisions[0].type == "trade_executed"
+        assert decisions[1].type == "regime_change"
+
+
+class TestPushEvent:
+    def test_push_event_adds_to_queue(self):
+        servicer = make_servicer()
+        servicer.push_event("trade_executed", "Bought NVDA", "info", {"symbol": "NVDA"})
+        assert servicer._event_queue.qsize() == 1
+
+    def test_push_event_stores_correct_fields(self):
+        servicer = make_servicer()
+        servicer.push_event("regime_change", "Bull to Bear", "warning", {"old": "bull"})
+        events = servicer._drain_events()
+        assert len(events) == 1
+        assert events[0].event_type == "regime_change"
+        assert events[0].title == "Bull to Bear"
+        assert events[0].severity == "warning"
+
+
+class TestDrainEvents:
+    def test_drain_returns_all_events(self):
+        servicer = make_servicer()
+        servicer.push_event("trade_executed", "Bought NVDA", "info", {"symbol": "NVDA"})
+        servicer.push_event("regime_change", "Bull to Bear", "warning", {})
+        events = servicer._drain_events()
+        assert len(events) == 2
+        assert events[0].event_type == "trade_executed"
+        assert events[1].event_type == "regime_change"
+
+    def test_drain_empties_queue(self):
+        servicer = make_servicer()
+        servicer.push_event("trade_executed", "Bought NVDA", "info", {})
+        servicer._drain_events()
+        assert servicer._event_queue.qsize() == 0
+
+
+class TestStreamEvents:
+    def test_stream_yields_events(self):
+        servicer = make_servicer()
+        servicer.push_event("trade_executed", "Bought NVDA", "info", {"symbol": "NVDA"})
+        servicer.push_event("regime_change", "Bull to Bear", "warning", {})
+
+        ctx = MockContext()
+        ctx.is_active = lambda: True
+        events = list(servicer._drain_events())
+
+        assert len(events) == 2
+        assert events[0].event_type == "trade_executed"
+        assert events[1].event_type == "regime_change"
+
+    def test_stream_events_stops_when_context_inactive(self):
+        servicer = make_servicer()
+
+        ctx = MockContext()
+        call_count = [0]
+
+        def is_active():
+            call_count[0] += 1
+            return call_count[0] <= 1  # active only on first check
+
+        ctx.is_active = is_active
+        # No events in queue; context becomes inactive quickly
+        events = list(servicer.StreamEvents(None, ctx))
+        assert events == []
+
+
+class TestStreamThermoMetrics:
+    def test_stream_yields_thermo_snapshot(self):
+        thermo = MagicMock()
+        thermo.clarity_score.return_value = 0.9
+        thermo.opportunity_score.return_value = 0.7
+        thermo.market_health.return_value = "green"
+        thermo.momentum.return_value = "rising"
+        thermo.interpret.return_value = "Looking good"
+
+        servicer = make_servicer(thermo=thermo)
+
+        call_count = [0]
+
+        def is_active():
+            call_count[0] += 1
+            return call_count[0] <= 1  # yield exactly one snapshot then stop
+
+        ctx = MockContext()
+        ctx.is_active = is_active
+
+        snapshots = list(servicer.StreamThermoMetrics(None, ctx))
+        assert len(snapshots) == 1
+        assert snapshots[0].clarity_score == 0.9
+        assert snapshots[0].market_health == "green"
