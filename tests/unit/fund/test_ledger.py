@@ -72,6 +72,31 @@ class TestRedemption:
         assert tx.status == TransactionStatus.REJECTED
 
 
+class TestCashReserve:
+    def test_redeem_within_cash(self):
+        ledger = UnitLedger()
+        fund = Fund(nav=Decimal("1000000"), units_outstanding=Decimal("1000"),
+                     high_water_mark=Decimal("1000"), inception_date=date(2026, 1, 1))
+        member = Member(id="m1", name="Alice", email="a@b.com",
+                        units=Decimal("30"), cost_basis=Decimal("30000"), join_date=date(2026, 1, 1))
+        tx = ledger.redeem(fund=fund, member=member, units=Decimal("30"),
+                           process_date=date(2026, 6, 1), available_cash=Decimal("50000"))
+        assert tx.status == TransactionStatus.PROCESSED
+        assert tx.requires_liquidation is False
+
+    def test_redeem_exceeds_cash(self):
+        ledger = UnitLedger()
+        fund = Fund(nav=Decimal("1000000"), units_outstanding=Decimal("1000"),
+                     high_water_mark=Decimal("1000"), inception_date=date(2026, 1, 1))
+        member = Member(id="m1", name="Alice", email="a@b.com",
+                        units=Decimal("100"), cost_basis=Decimal("100000"), join_date=date(2026, 1, 1))
+        tx = ledger.redeem(fund=fund, member=member, units=Decimal("100"),
+                           process_date=date(2026, 6, 1), available_cash=Decimal("50000"))
+        assert tx.status == TransactionStatus.PROCESSED
+        assert tx.requires_liquidation is True
+        assert tx.liquidation_amount == Decimal("50000")
+
+
 class TestLedgerHistory:
     def test_transaction_history(self):
         ledger = UnitLedger()

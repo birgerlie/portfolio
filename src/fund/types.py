@@ -95,6 +95,8 @@ class Transaction:
     fee_breakdown: FeeBreakdown
     timestamp: datetime
     status: TransactionStatus = TransactionStatus.PENDING
+    requires_liquidation: bool = False
+    liquidation_amount: Decimal = Decimal("0")
 
 
 @dataclass

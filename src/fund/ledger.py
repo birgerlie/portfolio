@@ -28,7 +28,7 @@ class UnitLedger:
         return tx
 
     def redeem(self, fund: Fund, member: Member, units: Decimal,
-               process_date: date) -> Transaction:
+               process_date: date, available_cash: Decimal = None) -> Transaction:
         nav_per_unit = fund.nav_per_unit
         payout = units * nav_per_unit
 
@@ -58,12 +58,21 @@ class UnitLedger:
         member.units -= units
         fund.units_outstanding -= units
         fund.nav -= payout
+
+        requires_liquidation = False
+        liquidation_amount = Decimal("0")
+        if available_cash is not None and payout > available_cash:
+            requires_liquidation = True
+            liquidation_amount = payout - available_cash
+
         tx = Transaction(
             member_id=member.id, type=TransactionType.REDEEM,
             units=units, nav_per_unit=nav_per_unit, amount=payout,
             fee_breakdown=FeeBreakdown(),
             timestamp=datetime.combine(process_date, datetime.min.time()),
-            status=TransactionStatus.PROCESSED)
+            status=TransactionStatus.PROCESSED,
+            requires_liquidation=requires_liquidation,
+            liquidation_amount=liquidation_amount)
         self._transactions.append(tx)
         return tx
 
