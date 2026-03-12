@@ -14,6 +14,7 @@ import time
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from uuid import uuid4
 
 # Ensure src/ is on path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -155,6 +156,7 @@ def sync_to_supabase(supabase: SupabaseSync, fund: Fund, broker: MockBroker,
     for nav in nav_history:
         try:
             supabase._client.table("weekly_nav").upsert({
+                "id": str(uuid4()),
                 "date": str(nav.date),
                 "nav": float(nav.nav),
                 "nav_per_unit": float(nav.nav_per_unit),
@@ -178,6 +180,7 @@ def sync_to_supabase(supabase: SupabaseSync, fund: Fund, broker: MockBroker,
     for inst in universe.instruments:
         try:
             supabase._client.table("instruments").upsert({
+                "id": str(uuid4()),
                 "symbol": inst.symbol,
                 "name": inst.name,
                 "asset_class": inst.asset_class,
