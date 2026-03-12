@@ -164,3 +164,17 @@ model Instrument {
 
   @@map("instruments")
 }
+
+// ── Notifications ──────────────────────────────────────────────────────────
+
+model Notification {
+  id          String   @id @default(cuid())
+  eventType   String   @map("event_type")
+  priority    String   // high / medium / low
+  title       String
+  data        Json     @default("{}")
+  read        Boolean  @default(false)
+  createdAt   DateTime @map("created_at") @default(now())
+
+  @@map("notifications")
+}
