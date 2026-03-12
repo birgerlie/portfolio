@@ -31,6 +31,8 @@ from fund.grpc_server import FundServiceServicer
 from fund.belief_synthesizer import BeliefSynthesizer
 from fund.grpc_runner import create_server, run_server
 from fund.supabase_sync import SupabaseSync, SupabaseConfig
+from fund.notifications import NotificationManager
+from fund.email_reports import EmailReporter
 
 __all__ = [
     "Fund", "Member", "Transaction", "TransactionType", "TransactionStatus",
@@ -44,4 +46,6 @@ __all__ = [
     "FundServiceServicer", "create_server", "run_server",
     "BeliefSynthesizer",
     "SupabaseSync", "SupabaseConfig",
+    "NotificationManager",
+    "EmailReporter",
 ]

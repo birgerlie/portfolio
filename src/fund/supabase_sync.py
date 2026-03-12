@@ -40,3 +40,7 @@ class SupabaseSync:
             [{"updated_at": datetime.now().isoformat(), **p} for p in positions],
             on_conflict="symbol",
         ).execute()
+
+    def push_notification(self, notification: dict) -> None:
+        """Insert a notification row for web push via Supabase Realtime."""
+        self._client.table("notifications").insert(notification).execute()
