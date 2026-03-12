@@ -52,9 +52,31 @@ pytest tests/integration/
 pytest tests/
 ```
 
+## Data Storage
+
+This portfolio system is designed to integrate with [SiliconDB](https://github.com/birgerlie/SiliconDB) for:
+- Historical market data and performance tracking
+- Fund state and position management
+- User account data and transaction history
+- Belief system snapshots and decision audit trails
+
+```python
+# Future integration with SiliconDB
+from silicondb import SiliconDB
+
+db = SiliconDB("/path/to/fund/data")
+fund_positions = db.search("fund:positions", k=10)
+performance_history = db.triples(subject="fund", predicate="performance")
+```
+
 ## Documentation
 
 - `docs/STOCK-TRADING-SIMULATOR-COMPLETE-GUIDE.md` - Complete user guide and API reference
 - `docs/TRADING-SYSTEM-SCIENCE.md` - Scientific foundations and theory
 - `docs/RESEARCH-REPORT-AUTONOMOUS-TRADING.md` - Research report for institutional investors
 - `docs/2026-03-12-autonomous-portfolio-strategy-selection.md` - Implementation plan
+
+## Related Projects
+
+- **[SiliconDB](https://github.com/birgerlie/SiliconDB)** - Vector database for fund data and performance tracking
+- **Fund Platform** - User accounts, payments, and fund management (coming soon)
