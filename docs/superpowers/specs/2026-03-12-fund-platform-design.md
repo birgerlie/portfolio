@@ -30,23 +30,40 @@ Mac (Home)                                    Cloud
 
 **Key principle:** Mac initiates outbound gRPC connection to cloud. No inbound firewall holes. If Mac is offline, cloud serves cached last-known state with a "last updated" indicator.
 
+### Engine Health Monitor
+The Mac sends a heartbeat to Supabase every 60 seconds containing:
+- **Status:** running / degraded / stopped
+- **Alpaca connection:** connected / disconnected
+- **Last trade:** timestamp of most recent execution
+- **Active positions:** count
+- **Current regime:** bull / bear / transition / consolidation
+- **Next scheduled action:** what the engine plans to do next and when
+
+The dashboard shows a persistent status pill:
+- **Green "Engine Running"** — heartbeat < 2 min old, all systems normal
+- **Yellow "Engine Degraded"** — heartbeat recent but Alpaca disconnected or other issue
+- **Red "Engine Offline"** — no heartbeat for > 5 min
+- Tapping the pill shows full engine status detail
+
+If the engine goes offline for > 15 minutes, members get a push notification. Fund manager gets notified after 5 minutes.
+
 ### Connection Model
 The Mac establishes an outbound gRPC connection to the cloud server and holds a bidirectional stream open. The cloud sends requests over this stream (request-response over streaming). If the Mac disconnects, the cloud falls back to cached data and shows a staleness badge ("Data from 2h ago"). Reconnection is automatic.
 
 ### Persistence
 - **Mac:** SQLite for fund state, positions, transaction ledger, belief history
-- **Cloud:** Postgres for user accounts, cached fund snapshots, Stripe records
-- Cloud DB is populated by gRPC pushes from Mac (every snapshot is persisted)
+- **Cloud:** Supabase Postgres for user accounts, cached fund snapshots, Stripe records. Supabase Realtime for live dashboard updates.
+- Cloud DB is populated by Mac pushing snapshots via Supabase client library (every snapshot is persisted). Supabase Realtime broadcasts changes to connected web clients.
 
 ### Deployment
-- **Cloud:** Vercel (Next.js frontend) + Railway/Fly.io (API server + gRPC endpoint + Postgres)
+- **Cloud:** Vercel (Next.js frontend) + Supabase (Postgres, Auth, Realtime, Edge Functions)
 - **Mac:** Python process running as launchd service
-- **gRPC tunnel:** Mac connects outbound to cloud gRPC endpoint (standard TLS, no firewall config needed)
+- **gRPC tunnel:** Mac connects outbound to cloud gRPC endpoint via Supabase Edge Function or a lightweight relay on Fly.io
 
 ### Authentication
-- **Members:** NextAuth.js with email magic links (simple, no passwords)
-- **Admin (fund manager):** Same auth + admin role flag
-- **gRPC:** Mutual TLS between Mac and cloud server (pre-shared certs)
+- **Members:** Supabase Auth with email magic links (simple, no passwords)
+- **Admin (fund manager):** Same auth + admin role via Supabase RLS policies
+- **gRPC:** Service role key for Mac → Supabase writes; mutual TLS for gRPC relay
 
 ---
 
