@@ -14,6 +14,24 @@ export default async function Dashboard() {
   const supabase = await createSupabaseServer();
   const { data: { user } } = await supabase.auth.getUser();
 
+  // Check if engine is online (heartbeat updated within last 5 minutes)
+  const heartbeat = await prisma.engineHeartbeat.findFirst({ where: { id: "singleton" } });
+  const engineOnline = heartbeat
+    ? (Date.now() - new Date(heartbeat.updatedAt).getTime()) < 5 * 60 * 1000
+    : false;
+
+  if (!engineOnline) {
+    return (
+      <div className="pt-14 min-h-screen flex flex-col items-center justify-center px-6">
+        <div className="w-3 h-3 rounded-full bg-zinc-700 mb-6" />
+        <h1 className="text-2xl font-light text-zinc-300 mb-2">Engine Offline</h1>
+        <p className="text-zinc-600 text-sm max-w-md text-center">
+          The fund engine is not running. Data will appear here once the server is started.
+        </p>
+      </div>
+    );
+  }
+
   const snapshot = await prisma.fundSnapshot.findFirst({
     orderBy: { date: "desc" },
   });
