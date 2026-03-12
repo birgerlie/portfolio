@@ -27,6 +27,9 @@ from fund.journal import JournalEntry, DailyJournal, EventJournal
 from fund.alpaca_broker import AlpacaBroker, AlpacaConfig, BrokerAccount, BrokerPosition, BrokerOrder
 from fund.order_executor import OrderExecutor, ExecutedOrder
 from fund.position_sync import PositionSync, SyncResult
+from fund.grpc_server import FundServiceServicer
+from fund.grpc_runner import create_server, run_server
+from fund.supabase_sync import SupabaseSync, SupabaseConfig
 
 __all__ = [
     "Fund", "Member", "Transaction", "TransactionType", "TransactionStatus",
@@ -37,4 +40,6 @@ __all__ = [
     "AlpacaBroker", "AlpacaConfig", "BrokerAccount", "BrokerPosition", "BrokerOrder",
     "OrderExecutor", "ExecutedOrder",
     "PositionSync", "SyncResult",
+    "FundServiceServicer", "create_server", "run_server",
+    "SupabaseSync", "SupabaseConfig",
 ]
