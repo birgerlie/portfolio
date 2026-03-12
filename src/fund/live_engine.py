@@ -90,26 +90,44 @@ class SiliconDBBeliefBridge:
             self._connected = False
 
     def _load_ontology(self):
-        """Load market ontology triples into SiliconDB's knowledge graph."""
+        """Load market ontology into SiliconDB: triples + belief documents for observable nodes."""
         if not self.connected or self._ontology_loaded:
             return
         try:
             from fund.ontology import build_ontology
             triples = build_ontology(use_network=True)
+
+            # 1. Insert triples (structural knowledge graph)
             batch = []
             for t in triples:
                 batch.append({
                     "subject": t.subject,
                     "predicate": t.predicate,
-                    "object": t.object,
-                    "weight": t.weight,
+                    "object_value": t.object,
+                    "probability": t.weight,
                 })
-            # Load in batches of 500
             for i in range(0, len(batch), 500):
-                self._client.add_triples(batch[i:i + 500])
+                self._client.insert_triples(batch[i:i + 500])
+
+            # 2. Create belief documents for observable property nodes
+            #    so record_observation() doesn't throw documentNotFound
+            observable_ids = [
+                t.object for t in triples
+                if t.predicate.startswith("has_") and ":" in t.object
+            ]
+            for ext_id in observable_ids:
+                try:
+                    self._client.ingest(
+                        external_id=ext_id,
+                        text=ext_id,  # minimal content
+                        metadata={"type": "observable", "ticker": ext_id.split(":")[0]},
+                    )
+                except Exception:
+                    pass  # already exists
+
             self._ontology_loaded = True
-            logger.info("Loaded %d ontology triples into SiliconDB", len(triples))
-            print(f"    Loaded {len(triples)} ontology triples into SiliconDB")
+            logger.info("Loaded %d triples + %d observable nodes into SiliconDB", len(triples), len(observable_ids))
+            print(f"    Loaded {len(triples)} triples + {len(observable_ids)} observable nodes into SiliconDB")
         except Exception as e:
             logger.warning("Failed to load ontology into SiliconDB: %s", e)
             print(f"    Ontology load failed: {e} (SiliconDB will discover relationships from data)")
@@ -118,46 +136,43 @@ class SiliconDBBeliefBridge:
     def connected(self) -> bool:
         return self._connected and self._client is not None
 
-    def record_price_observation(self, symbol: str, returns: List[float], source: str = "yahoo_finance"):
-        """Record price-based observations for a symbol into SiliconDB."""
+    def record_price_observations(self, all_returns: Dict[str, List[float]], source: str = "yahoo_finance"):
+        """Record price-based observations for all symbols in a single batch."""
         if not self.connected:
             return
 
-        try:
+        observations = []
+        for symbol, returns in all_returns.items():
             btype, confidence = _classify_belief(returns)
-
-            # Record the observation: confirmed = positive signal for the belief type
-            # e.g., if "high_growth" with 0.8 confidence → confirmed observation
             confirmed = btype in ("high_growth", "stable")
 
-            # Record on the ontology property nodes
-            self._client.record_observation(
-                external_id=f"{symbol}:return",
-                confirmed=confirmed,
-                source=source,
-            )
+            observations.append({
+                "external_id": f"{symbol}:return",
+                "confirmed": confirmed,
+                "source": source,
+            })
 
-            # Volatility observation
             if len(returns) >= 10:
                 vol = statistics.stdev(returns[-20:]) if len(returns) >= 20 else statistics.stdev(returns)
-                low_vol = vol < 0.02
-                self._client.record_observation(
-                    external_id=f"{symbol}:volatility",
-                    confirmed=low_vol,  # confirmed = low volatility (stable)
-                    source=source,
-                )
+                observations.append({
+                    "external_id": f"{symbol}:volatility",
+                    "confirmed": vol < 0.02,
+                    "source": source,
+                })
 
-            # Momentum observation
             if len(returns) >= 5:
                 recent_positive = sum(1 for r in returns[-5:] if r > 0) >= 3
-                self._client.record_observation(
-                    external_id=f"{symbol}:momentum",
-                    confirmed=recent_positive,
-                    source=source,
-                )
+                observations.append({
+                    "external_id": f"{symbol}:momentum",
+                    "confirmed": recent_positive,
+                    "source": source,
+                })
 
+        try:
+            n = self._client.record_observation_batch(observations)
+            logger.info("Recorded %d observations for %d symbols", n, len(all_returns))
         except Exception as e:
-            logger.warning("Failed to record observation for %s: %s", symbol, e)
+            logger.warning("Failed to record observations: %s", e)
 
     def propagate_beliefs(self, symbols: List[str]):
         """Propagate beliefs through the SiliconDB graph (co-occurring stocks)."""
@@ -333,8 +348,7 @@ class LiveEngine:
         # 2. Feed observations into SiliconDB
         if self.belief_bridge:
             print("    Recording observations in SiliconDB...")
-            for symbol, returns in all_returns.items():
-                self.belief_bridge.record_price_observation(symbol, returns)
+            self.belief_bridge.record_price_observations(all_returns)
 
             # Propagate beliefs through the graph
             self.belief_bridge.propagate_beliefs(list(all_returns.keys()))
