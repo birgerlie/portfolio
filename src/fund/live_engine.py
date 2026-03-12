@@ -261,7 +261,7 @@ class LiveEngine:
         supabase: Optional[SupabaseSync],
         synthesizer=None,
         interval_seconds: int = 300,
-        silicondb_url: Optional[str] = None,
+        silicondb_url: str = "http://127.0.0.1:8642",
     ):
         self.symbols = symbols
         self.fund = fund
@@ -272,13 +272,15 @@ class LiveEngine:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
-        # SiliconDB belief system (optional, falls back to local)
-        self.belief_bridge = SiliconDBBeliefBridge(silicondb_url) if silicondb_url else None
-        if self.belief_bridge and self.belief_bridge.connected:
-            print("    Belief engine: SiliconDB (Bayesian + propagation + contradictions)")
-        else:
-            print("    Belief engine: Local (basic classification)")
-            self.belief_bridge = None
+        # SiliconDB belief system
+        silicondb_url = silicondb_url or "http://127.0.0.1:8642"
+        self.belief_bridge = SiliconDBBeliefBridge(silicondb_url)
+        if not self.belief_bridge.connected:
+            raise RuntimeError(
+                f"SiliconDB not available at {silicondb_url}. "
+                "Start it with: silicondb serve /path/to/db --port 8642"
+            )
+        print("    Belief engine: SiliconDB (Bayesian + propagation + contradictions)")
 
         # State
         self.current_prices: Dict[str, float] = {}
@@ -346,29 +348,28 @@ class LiveEngine:
             return
 
         # 2. Feed observations into SiliconDB
-        if self.belief_bridge:
-            print("    Recording observations in SiliconDB...")
-            self.belief_bridge.record_price_observations(all_returns)
+        print("    Recording observations in SiliconDB...")
+        self.belief_bridge.record_price_observations(all_returns)
 
-            # Propagate beliefs through the graph
-            self.belief_bridge.propagate_beliefs(list(all_returns.keys()))
+        # Propagate beliefs through the graph
+        self.belief_bridge.propagate_beliefs(list(all_returns.keys()))
 
-            # Detect contradictions/anomalies
-            self.anomalies = self.belief_bridge.detect_anomalies()
-            if self.anomalies:
-                print(f"    CONTRADICTIONS detected: {len(self.anomalies)}")
-                for a in self.anomalies[:3]:
-                    print(f"      {a.get('belief_a', '?')} vs {a.get('belief_b', '?')} (conflict: {a.get('conflict_score', 0):.2f})")
+        # Detect contradictions/anomalies
+        self.anomalies = self.belief_bridge.detect_anomalies()
+        if self.anomalies:
+            print(f"    CONTRADICTIONS detected: {len(self.anomalies)}")
+            for a in self.anomalies[:3]:
+                print(f"      {a.get('belief_a', '?')} vs {a.get('belief_b', '?')} (conflict: {a.get('conflict_score', 0):.2f})")
 
-            # Find uncertain beliefs
-            self.uncertain_beliefs = self.belief_bridge.get_uncertain()
-            if self.uncertain_beliefs:
-                print(f"    Uncertain beliefs: {len(self.uncertain_beliefs)}")
-                for u in self.uncertain_beliefs[:3]:
-                    print(f"      {u.get('external_id', '?')} (entropy: {u.get('entropy', 0):.2f})")
+        # Find uncertain beliefs
+        self.uncertain_beliefs = self.belief_bridge.get_uncertain()
+        if self.uncertain_beliefs:
+            print(f"    Uncertain beliefs: {len(self.uncertain_beliefs)}")
+            for u in self.uncertain_beliefs[:3]:
+                print(f"      {u.get('external_id', '?')} (entropy: {u.get('entropy', 0):.2f})")
 
-            # Snapshot current beliefs
-            self.belief_bridge.snapshot(list(all_returns.keys()))
+        # Snapshot current beliefs
+        self.belief_bridge.snapshot(list(all_returns.keys()))
 
         # 3. Compute market metrics
         avg_returns = [statistics.mean(r) for r in all_returns.values()]
@@ -535,7 +536,7 @@ class LiveEngine:
                         "trades": trades,
                         "prices": {s: round(p, 2) for s, p in self.current_prices.items()},
                         "silicondb": silicondb_insights if silicondb_insights else None,
-                        "belief_engine": "silicondb" if self.belief_bridge else "local",
+                        "belief_engine": "silicondb",
                     },
                     "regime_summary": f"Market regime: {result.regime.value}. Strategy: {result.selected_strategy.name} (confidence {result.selected_strategy.confidence:.0%}). {len(trades)} trade suggestions.",
                     "trades_executed": 0,
