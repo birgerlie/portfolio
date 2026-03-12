@@ -43,6 +43,10 @@ export default async function Dashboard() {
     orderBy: { marketValue: "desc" },
   });
 
+  const journal = await prisma.journal.findFirst({
+    orderBy: { updatedAt: "desc" },
+  });
+
   const currentValue = member && snapshot
     ? member.units * snapshot.navPerUnit
     : snapshot?.nav ?? 0;
@@ -77,6 +81,9 @@ export default async function Dashboard() {
         </div>
       </section>
 
+      {/* Engine Analysis */}
+      {journal && <EngineAnalysis journal={journal} regime={heartbeat?.currentRegime ?? ""} />}
+
       {/* Positions */}
       <PositionList
         positions={positions}
@@ -84,6 +91,81 @@ export default async function Dashboard() {
         cash={snapshot?.cash ?? 0}
       />
     </div>
+  );
+}
+
+function EngineAnalysis({ journal, regime }: { journal: { regimeSummary: string; entries: unknown; updatedAt: Date }; regime: string }) {
+  const entries = journal.entries as Record<string, unknown> | null;
+  if (!entries) return null;
+
+  const strategy = entries.strategy as string ?? "";
+  const strategyConfidence = entries.strategy_confidence as number ?? 0;
+  const overallConfidence = entries.overall_confidence as number ?? 0;
+  const trades = (entries.trades as Array<{ type: string; symbol: string; allocation: number; reason: string }>) ?? [];
+  const detectedRegime = (entries.regime as string) ?? regime;
+
+  const regimeColors: Record<string, string> = {
+    bull: "text-green-400",
+    bear: "text-red-400",
+    transition: "text-yellow-400",
+    consolidation: "text-blue-400",
+  };
+
+  const regimeLabels: Record<string, string> = {
+    bull: "Bull Market",
+    bear: "Bear Market",
+    transition: "Transition",
+    consolidation: "Consolidation",
+  };
+
+  return (
+    <section className="max-w-5xl mx-auto px-6 pb-12">
+      <div className="bg-zinc-900/50 rounded-2xl border border-zinc-800 p-6">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-sm uppercase tracking-wider text-zinc-500">Engine Analysis</h2>
+          <span className="text-xs text-zinc-600">
+            Updated {new Date(journal.updatedAt).toLocaleTimeString()}
+          </span>
+        </div>
+
+        {/* Regime & Strategy */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+          <div>
+            <span className="text-xs text-zinc-500">Market Regime</span>
+            <p className={`text-lg font-medium ${regimeColors[detectedRegime] ?? "text-zinc-300"}`}>
+              {regimeLabels[detectedRegime] ?? detectedRegime}
+            </p>
+          </div>
+          <div>
+            <span className="text-xs text-zinc-500">Active Strategy</span>
+            <p className="text-lg font-medium text-zinc-200">{strategy.replace(/_/g, " ")}</p>
+          </div>
+          <div>
+            <span className="text-xs text-zinc-500">Confidence</span>
+            <p className="text-lg font-medium text-zinc-200">{(overallConfidence * 100).toFixed(0)}%</p>
+          </div>
+        </div>
+
+        {/* Trade Suggestions */}
+        {trades.length > 0 && (
+          <div>
+            <span className="text-xs text-zinc-500 mb-2 block">Suggested Trades</span>
+            <div className="space-y-1.5">
+              {trades.map((t, i) => (
+                <div key={i} className="flex items-center gap-3 text-sm">
+                  <span className={`w-10 text-xs font-medium ${t.type === "BUY" ? "text-green-400" : "text-red-400"}`}>
+                    {t.type}
+                  </span>
+                  <span className="text-zinc-200 font-medium w-12">{t.symbol}</span>
+                  <span className="text-zinc-500 text-xs flex-1">{t.reason}</span>
+                  <span className="text-zinc-400 text-xs">{(t.allocation * 100).toFixed(1)}%</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 

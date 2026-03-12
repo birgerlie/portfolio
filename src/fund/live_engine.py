@@ -298,4 +298,35 @@ class LiveEngine:
         except Exception as e:
             logger.warning("Failed to upsert weekly_nav: %s", e)
 
+        # Journal entry with analysis
+        if self.last_analysis:
+            result = self.last_analysis
+            trades = [
+                {
+                    "type": t.type,
+                    "symbol": t.symbol,
+                    "allocation": round(t.allocation, 4),
+                    "reason": t.reason,
+                }
+                for t in result.execution_plan.trades[:10]
+            ]
+            try:
+                self.supabase.push_journal({
+                    "id": str(uuid4()),
+                    "date": str(date.today()),
+                    "entries": {
+                        "regime": result.regime.value,
+                        "strategy": result.selected_strategy.name,
+                        "strategy_confidence": round(result.selected_strategy.confidence, 2),
+                        "overall_confidence": round(result.confidence, 2),
+                        "trades": trades,
+                        "prices": {s: round(p, 2) for s, p in self.current_prices.items()},
+                    },
+                    "regime_summary": f"Market regime: {result.regime.value}. Strategy: {result.selected_strategy.name} (confidence {result.selected_strategy.confidence:.0%}). {len(trades)} trade suggestions.",
+                    "trades_executed": 0,
+                    "nav_change_pct": 0,
+                })
+            except Exception as e:
+                logger.warning("Failed to upsert journal: %s", e)
+
         print("    Sync complete")
