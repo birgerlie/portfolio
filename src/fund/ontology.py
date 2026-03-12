@@ -55,33 +55,9 @@ SECTOR_NORMALIZE: Dict[str, str] = {
 
 # ── Known supply chain relationships (curated, high-signal) ──────────────────
 
-SUPPLY_CHAIN = [
-    ("TSM", "supplies", "NVDA", 0.9),
-    ("TSM", "supplies", "AAPL", 0.85),
-    ("TSM", "supplies", "AMD", 0.8),
-    ("TSM", "supplies", "QCOM", 0.7),
-    ("TSM", "supplies", "AMZN", 0.3),
-    ("TSM", "supplies", "GOOG", 0.4),
-    ("TSM", "supplies", "MRVL", 0.5),
-    ("TSM", "supplies", "AVGO", 0.6),
-    ("NVDA", "supplies", "MSFT", 0.7),
-    ("NVDA", "supplies", "GOOG", 0.5),
-    ("NVDA", "supplies", "AMZN", 0.5),
-    ("NVDA", "supplies", "META", 0.6),
-    ("NVDA", "supplies", "ORCL", 0.4),
-    ("NVDA", "supplies", "TSLA", 0.3),
-    ("AVGO", "supplies", "AAPL", 0.6),
-    ("QCOM", "supplies", "AAPL", 0.3),
-    ("INTC", "supplies", "DELL", 0.5),
-    ("INTC", "supplies", "HPQ", 0.4),
-    ("INTC", "supplies", "LENOVO", 0.3),
-    ("MU", "supplies", "AAPL", 0.4),
-    ("MU", "supplies", "NVDA", 0.3),
-    ("LRCX", "supplies", "TSM", 0.7),
-    ("ASML", "supplies", "TSM", 0.8),
-    ("AMAT", "supplies", "TSM", 0.6),
-    ("KLAC", "supplies", "TSM", 0.5),
-]
+# Supply chain edges are intentionally omitted — SiliconDB discovers these
+# automatically through add_cooccurrences() and belief propagation from price data.
+# Only structural relationships (sector, index, macro) are seeded here.
 
 # ── Known competition pairs (curated) ───────────────────────────────────────
 
@@ -347,11 +323,6 @@ def build_ontology(use_network: bool = True) -> List[Triple]:
         for symbol in nasdaq100:
             triples.append(Triple("QQQ", "contains", symbol, w))
             triples.append(Triple(symbol, "member_of", "QQQ", w))
-
-    # ── Supply chain (curated) ───────────────────────────────────────────
-    for subj, pred, obj, weight in SUPPLY_CHAIN:
-        triples.append(Triple(subj, pred, obj, weight))
-        triples.append(Triple(obj, "depends_on", subj, weight))
 
     # ── Competition (curated, bidirectional) ─────────────────────────────
     for a, b, weight in COMPETITORS:

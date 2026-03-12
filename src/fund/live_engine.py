@@ -75,6 +75,7 @@ class SiliconDBBeliefBridge:
         self._client = None
         self._url = silicondb_url
         self._connected = False
+        self._ontology_loaded = False
         self._connect()
 
     def _connect(self):
@@ -83,9 +84,35 @@ class SiliconDBBeliefBridge:
             self._client = SiliconDBClient(base_url=self._url, timeout=10.0)
             self._connected = True
             logger.info("Connected to SiliconDB at %s", self._url)
+            self._load_ontology()
         except Exception as e:
             logger.warning("SiliconDB not available: %s (using local beliefs)", e)
             self._connected = False
+
+    def _load_ontology(self):
+        """Load market ontology triples into SiliconDB's knowledge graph."""
+        if not self.connected or self._ontology_loaded:
+            return
+        try:
+            from fund.ontology import build_ontology
+            triples = build_ontology(use_network=True)
+            batch = []
+            for t in triples:
+                batch.append({
+                    "subject": t.subject,
+                    "predicate": t.predicate,
+                    "object": t.object,
+                    "weight": t.weight,
+                })
+            # Load in batches of 500
+            for i in range(0, len(batch), 500):
+                self._client.add_triples(batch[i:i + 500])
+            self._ontology_loaded = True
+            logger.info("Loaded %d ontology triples into SiliconDB", len(triples))
+            print(f"    Loaded {len(triples)} ontology triples into SiliconDB")
+        except Exception as e:
+            logger.warning("Failed to load ontology into SiliconDB: %s", e)
+            print(f"    Ontology load failed: {e} (SiliconDB will discover relationships from data)")
 
     @property
     def connected(self) -> bool:
