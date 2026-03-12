@@ -96,3 +96,75 @@ class TestGetUniverse:
         assert response.max_size == 20
         assert len(response.instruments) == 1
         assert response.instruments[0].symbol == "NVDA"
+
+
+class TestGetMemberPosition:
+    def test_returns_member_data(self):
+        fund = MagicMock()
+        fund.nav_per_unit = Decimal("105")
+
+        member = MagicMock()
+        member.id = "m1"
+        member.name = "Alice"
+        member.units = Decimal("100")
+        member.cost_basis = Decimal("10000")
+        member.lock_up_until = date(2026, 6, 1)
+        member.value_at_nav.return_value = Decimal("10500")
+        member.return_pct.return_value = 0.05
+
+        servicer = make_servicer(fund=fund, members={"m1": member})
+        req = fund_service_pb2.MemberId(id="m1")
+        response = servicer.GetMemberPosition(req, MockContext())
+
+        assert response.name == "Alice"
+        assert response.units == 100.0
+        assert response.return_pct == 0.05
+
+    def test_unknown_member_returns_error(self):
+        servicer = make_servicer()
+        ctx = MockContext()
+        req = fund_service_pb2.MemberId(id="unknown")
+        servicer.GetMemberPosition(req, ctx)
+        assert ctx.code == grpc.StatusCode.NOT_FOUND
+
+
+class TestGetThermoMetrics:
+    def test_returns_thermo_snapshot(self):
+        thermo = MagicMock()
+        thermo.clarity_score.return_value = 0.78
+        thermo.opportunity_score.return_value = 0.65
+        thermo.market_health.return_value = "green"
+        thermo.momentum.return_value = "rising"
+        thermo.interpret.return_value = "Strong clarity, good opportunity"
+
+        servicer = make_servicer(thermo=thermo)
+        response = servicer.GetThermoMetrics(Empty(), MockContext())
+
+        assert response.clarity_score == 0.78
+        assert response.market_health == "green"
+
+
+class TestGetDailyJournal:
+    def test_returns_journal_for_date(self):
+        journal = MagicMock()
+        journal.load_date.return_value = MagicMock(
+            date=date(2026, 3, 12),
+            entries=[
+                MagicMock(timestamp=datetime(2026, 3, 12, 10, 0), entry_type="trade_executed",
+                          summary="Bought NVDA", data={"symbol": "NVDA"}),
+            ],
+            regime_summary="Bull all day",
+            trades_executed=1,
+            nav_change_pct=0.02,
+            belief_snapshot={"NVDA": 0.85},
+            thermo_snapshot={"clarity": 0.78},
+        )
+
+        servicer = make_servicer(journal=journal)
+        req = fund_service_pb2.JournalDate(date="2026-03-12")
+        response = servicer.GetDailyJournal(req, MockContext())
+
+        assert response.date == "2026-03-12"
+        assert response.trades_executed == 1
+        assert response.regime_summary == "Bull all day"
+        assert len(response.entries) == 1

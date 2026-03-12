@@ -110,3 +110,92 @@ class FundServiceServicer(fund_service_pb2_grpc.FundServiceServicer):
             instruments=instruments,
             max_size=self._universe.max_size,
         )
+
+    def GetMemberPosition(self, request, context):
+        member = self._members.get(request.id)
+        if not member:
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details(f"Member {request.id} not found")
+            return fund_service_pb2.MemberPosition()
+
+        nav_per_unit = self._fund.nav_per_unit
+        return fund_service_pb2.MemberPosition(
+            member_id=member.id,
+            name=member.name,
+            units=float(member.units),
+            cost_basis=float(member.cost_basis),
+            current_value=float(member.value_at_nav(nav_per_unit)),
+            return_pct=member.return_pct(nav_per_unit),
+            lock_up_until=str(member.lock_up_until),
+        )
+
+    def GetMemberWhatIf(self, request, context):
+        nav_per_unit = float(self._fund.nav_per_unit)
+        if nav_per_unit <= 0:
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details("Fund not yet initialized")
+            return fund_service_pb2.WhatIfResponse()
+
+        units = request.amount / nav_per_unit
+        return fund_service_pb2.WhatIfResponse(
+            units_received=units,
+            nav_per_unit=nav_per_unit,
+            projected_value_at_10pct=request.amount * 1.10,
+            projected_value_at_neg10pct=request.amount * 0.90,
+        )
+
+    def GetThermoMetrics(self, request, context):
+        return fund_service_pb2.ThermoSnapshot(
+            clarity_score=self._thermo.clarity_score(),
+            opportunity_score=self._thermo.opportunity_score(),
+            capture_rate=0.0,  # populated when benchmarks available
+            market_health=self._thermo.market_health(),
+            momentum=self._thermo.momentum(),
+            interpretation=self._thermo.interpret(),
+        )
+
+    def GetEngineStatus(self, request, context):
+        heartbeat = self._health.create_heartbeat()
+        return fund_service_pb2.EngineStatus(
+            status=heartbeat.status,
+            alpaca_connected=heartbeat.alpaca_connected,
+            last_trade=_to_timestamp(heartbeat.last_trade),
+            active_positions=heartbeat.active_positions,
+            current_regime=heartbeat.current_regime,
+            next_action=heartbeat.next_action,
+            next_action_at=_to_timestamp(heartbeat.next_action_at),
+            timestamp=_to_timestamp(heartbeat.timestamp),
+        )
+
+    def GetDailyJournal(self, request, context):
+        from datetime import date as date_type
+        try:
+            d = date_type.fromisoformat(request.date)
+            daily = self._journal.load_date(d)
+        except (FileNotFoundError, ValueError) as e:
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details(str(e))
+            return fund_service_pb2.DailyJournalMsg()
+
+        entries = []
+        for e in daily.entries:
+            ts = e.timestamp if isinstance(e.timestamp, datetime) else datetime.fromisoformat(str(e.timestamp))
+            entry_type = e.entry_type if hasattr(e, 'entry_type') else e.get('entry_type', '')
+            summary = e.summary if hasattr(e, 'summary') else e.get('summary', '')
+            data = e.data if hasattr(e, 'data') else e.get('data', {})
+            entries.append(fund_service_pb2.Decision(
+                timestamp=_to_timestamp(ts),
+                type=entry_type,
+                summary=summary,
+                data=_to_struct(data),
+            ))
+
+        return fund_service_pb2.DailyJournalMsg(
+            date=request.date,
+            entries=entries,
+            regime_summary=daily.regime_summary,
+            trades_executed=daily.trades_executed,
+            nav_change_pct=daily.nav_change_pct,
+            belief_snapshot=_to_struct(daily.belief_snapshot),
+            thermo_snapshot=_to_struct(daily.thermo_snapshot),
+        )
