@@ -69,13 +69,23 @@ def _classify_belief(returns: List[float]) -> tuple:
 # ── SiliconDB Belief Bridge ──────────────────────────────────────────────────
 
 class SiliconDBBeliefBridge:
-    """Bridges market observations into SiliconDB's epistemic belief system."""
+    """Bridges market observations into SiliconDB's epistemic belief system.
+
+    Also subscribes to percolator events for real-time insight surfacing.
+    """
 
     def __init__(self, silicondb_url: str = "http://127.0.0.1:8642"):
         self._client = None
         self._url = silicondb_url
         self._connected = False
         self._ontology_loaded = False
+        self._event_thread: Optional[threading.Thread] = None
+        self._stop_events = threading.Event()
+
+        # Insights surfaced by percolator events (consumed by the engine)
+        self.insights: List[Dict] = []
+        self._insights_lock = threading.Lock()
+
         self._connect()
 
     def _connect(self):
@@ -85,9 +95,130 @@ class SiliconDBBeliefBridge:
             self._connected = True
             logger.info("Connected to SiliconDB at %s", self._url)
             self._load_ontology()
+            self._setup_percolator_rules()
+            self._start_event_listener()
         except Exception as e:
             logger.warning("SiliconDB not available: %s (using local beliefs)", e)
             self._connected = False
+
+    def _setup_percolator_rules(self):
+        """Register percolator rules that surface market insights."""
+        if not self.connected:
+            return
+
+        try:
+            # Enable event log
+            self._client.enable_event_log(capacity=100_000)
+
+            rules = [
+                # Contradiction detected via triple insertion
+                {
+                    "name": "market-contradiction",
+                    "emit_event_type": "insight.contradiction",
+                    "filter": {"event_types": ["triple.inserted"]},
+                    "conditions": [{"field": "predicate", "op": "equals", "value": "contradicts"}],
+                    "cooldown_ms": 5000,
+                },
+                # New cooccurrence discovered (stocks moving together)
+                {
+                    "name": "cooccurrence-discovered",
+                    "emit_event_type": "insight.cooccurrence",
+                    "filter": {"event_types": ["graph.edge.added"]},
+                    "conditions": [],
+                    "cooldown_ms": 10000,
+                },
+                # Belief observation recorded (track data flow)
+                {
+                    "name": "belief-updated",
+                    "emit_event_type": "insight.belief_update",
+                    "filter": {"event_types": ["ingest.batch.searchable"]},
+                    "conditions": [],
+                    "cooldown_ms": 1000,
+                },
+                # Triple updates (ontology changes)
+                {
+                    "name": "triple-change",
+                    "emit_event_type": "insight.graph_change",
+                    "filter": {"event_types": ["triple.updated", "triple.deleted"]},
+                    "conditions": [],
+                    "cooldown_ms": 5000,
+                },
+            ]
+
+            for rule in rules:
+                try:
+                    self._client.create_event_rule(**rule)
+                except Exception:
+                    pass  # rule may already exist
+
+            logger.info("Percolator rules registered (%d rules)", len(rules))
+            print(f"    Percolator: {len(rules)} event rules registered")
+        except Exception as e:
+            logger.warning("Failed to setup percolator rules: %s", e)
+
+    def _start_event_listener(self):
+        """Start background thread listening for percolator events via SSE."""
+        if not self.connected:
+            return
+
+        self._stop_events.clear()
+        self._event_thread = threading.Thread(target=self._event_loop, daemon=True)
+        self._event_thread.start()
+        logger.info("Event listener started")
+
+    def _event_loop(self):
+        """Subscribe to percolator events and collect insights."""
+        try:
+            def on_event(event):
+                event_type = event.get("event_type", "")
+                payload = event.get("payload", {})
+
+                insight = {
+                    "type": event_type,
+                    "sequence": event.get("sequence", 0),
+                    "timestamp": event.get("timestamp", ""),
+                    "payload": payload,
+                }
+
+                # Enrich based on event type
+                if event_type == "insight.contradiction":
+                    insight["summary"] = (
+                        f"Contradiction: {payload.get('subject', '?')} "
+                        f"contradicts {payload.get('object_value', '?')}"
+                    )
+                    logger.info("PERCOLATOR: %s", insight["summary"])
+                elif event_type == "insight.cooccurrence":
+                    insight["summary"] = f"New cooccurrence edge discovered"
+                    logger.info("PERCOLATOR: %s", insight["summary"])
+                elif event_type == "insight.graph_change":
+                    insight["summary"] = (
+                        f"Graph change: {payload.get('predicate', '?')} "
+                        f"on {payload.get('subject', '?')}"
+                    )
+
+                with self._insights_lock:
+                    self.insights.append(insight)
+                    # Keep last 100 insights
+                    if len(self.insights) > 100:
+                        self.insights = self.insights[-100:]
+
+            self._client.subscribe_events(
+                callback=on_event,
+                filter={"event_types": ["percolator.triggered"]},
+            )
+        except Exception as e:
+            logger.warning("Event listener failed: %s", e)
+
+    def drain_insights(self) -> List[Dict]:
+        """Drain collected insights (called by the engine each tick)."""
+        with self._insights_lock:
+            insights = self.insights.copy()
+            self.insights.clear()
+            return insights
+
+    def stop(self):
+        """Stop the event listener."""
+        self._stop_events.set()
 
     def _load_ontology(self):
         """Load market ontology into SiliconDB: triples + belief documents for observable nodes."""
@@ -288,6 +419,7 @@ class LiveEngine:
         self.last_analysis = None
         self.anomalies: List[Dict] = []
         self.uncertain_beliefs: List[Dict] = []
+        self.percolator_insights: List[Dict] = []
 
     def start(self):
         """Start the engine loop in a background thread."""
@@ -297,8 +429,9 @@ class LiveEngine:
         logger.info("Live engine started (interval=%ds)", self.interval)
 
     def stop(self):
-        """Stop the engine loop."""
+        """Stop the engine loop and event listener."""
         self._stop.set()
+        self.belief_bridge.stop()
         if self._thread:
             self._thread.join(timeout=10)
         logger.info("Live engine stopped")
@@ -317,11 +450,23 @@ class LiveEngine:
             print(f"\n  [{datetime.now().strftime('%H:%M:%S')}] Live engine tick...")
             self._fetch_prices()
             self._run_analysis()
+            self._drain_percolator_insights()
             self._sync_to_supabase()
             print(f"  [{datetime.now().strftime('%H:%M:%S')}] Tick complete. Regime: {self.current_regime}")
         except Exception as e:
             logger.error("Live engine tick failed: %s", e)
             print(f"  [ERROR] Tick failed: {e}")
+
+    def _drain_percolator_insights(self):
+        """Collect any insights surfaced by the percolator since last tick."""
+        insights = self.belief_bridge.drain_insights()
+        if insights:
+            self.percolator_insights = insights
+            print(f"    Percolator insights: {len(insights)}")
+            for i in insights[:5]:
+                print(f"      [{i['type']}] {i.get('summary', '')}")
+        else:
+            self.percolator_insights = []
 
     def _fetch_prices(self):
         """Fetch current prices for all symbols."""
@@ -511,7 +656,7 @@ class LiveEngine:
                 for t in result.execution_plan.trades[:10]
             ]
 
-            # Include SiliconDB insights if available
+            # Include SiliconDB insights
             silicondb_insights = {}
             if self.anomalies:
                 silicondb_insights["contradictions"] = [
@@ -522,6 +667,11 @@ class LiveEngine:
                 silicondb_insights["uncertain"] = [
                     {"id": u.get("external_id", ""), "entropy": u.get("entropy", 0)}
                     for u in self.uncertain_beliefs[:5]
+                ]
+            if self.percolator_insights:
+                silicondb_insights["percolator"] = [
+                    {"type": i["type"], "summary": i.get("summary", ""), "timestamp": i.get("timestamp", "")}
+                    for i in self.percolator_insights[:10]
                 ]
 
             try:
