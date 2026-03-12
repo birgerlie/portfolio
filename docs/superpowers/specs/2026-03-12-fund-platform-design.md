@@ -347,6 +347,52 @@ If OpenAI is unavailable, fall back to template-based narratives:
 
 ---
 
+## 7b. Daily Event Journal
+
+A complete audit trail of everything the engine does each day, stored locally and synced to the cloud once per day.
+
+### Design
+- **In-memory append** — every event (regime change, belief update, trade, rebalance, vote, fee, subscription/redemption) is appended as a `JournalEntry` throughout the day
+- **End-of-day flush** — at market close (or configurable time), serialize the full day's journal to disk as `journals/YYYY-MM-DD.json`
+- **Daily cloud sync** — push the completed journal file to Supabase once per day (via gRPC in sub-project 3)
+- **Immutable** — once flushed, a day's journal is never modified
+
+### Journal Entry
+```python
+JournalEntry(
+    timestamp: datetime,
+    type: str,        # regime_change, belief_update, trade_executed, rebalance,
+                      # universe_vote, fee_accrual, fee_crystallization,
+                      # subscription, redemption, heartbeat_degraded
+    summary: str,     # human-readable one-liner
+    data: dict,       # full structured payload (beliefs, sizing inputs, prices, etc.)
+)
+```
+
+### Daily Journal
+```python
+DailyJournal(
+    date: date,
+    entries: List[JournalEntry],
+    # End-of-day summaries (computed at flush)
+    regime_summary: str,          # dominant regime and transitions
+    belief_snapshot: dict,        # all beliefs at EOD
+    trades_executed: int,
+    nav_change_pct: float,
+    thermo_snapshot: dict,        # EOD thermodynamic metrics
+)
+```
+
+### Storage
+- Local: `journals/` directory, one JSON file per day
+- Cloud: `supabase.journals` table, one row per day with JSONB payload
+- Web dashboard: timeline view — pick any date, see everything that happened
+
+### Narrative synthesis
+The belief synthesizer (sub-project 5) can later narrate any day's journal into a readable story via OpenAI.
+
+---
+
 ## 8. Alpaca Integration
 
 The trading engine connects to Alpaca for live execution.
@@ -425,6 +471,7 @@ service FundService {
 - Recharts / D3 (charts)
 - Stripe React components
 - gRPC-web client
+- **Prisma ORM** — type-safe database access to Supabase Postgres, schema migrations, generated TypeScript types
 
 ### Page Flow (Narrative Scroll)
 
@@ -517,6 +564,7 @@ This is an investment club, not a regulated fund. However, to model it properly:
 | # | Sub-project | Description | Dependencies |
 |---|-------------|-------------|-------------|
 | 1 | **Fund Engine** | NAV, units, fees, HWM, benchmarks, thermo metrics | None |
+| 1b | **Daily Event Journal** | Audit trail, EOD flush to disk, daily cloud sync | Fund Engine |
 | 2 | **Alpaca Integration** | Live trading, position sync | Fund Engine |
 | 3 | **gRPC Service** | Async bidirectional streaming, proto definitions | Fund Engine |
 | 4 | **Web App** | Next.js dashboard, Stripe, user accounts | gRPC Service |
@@ -538,6 +586,6 @@ Build in order. Each sub-project gets its own implementation plan.
 
 ---
 
-**Document Version:** 1.1
+**Document Version:** 1.2
 **Date:** 2026-03-12
 **Status:** Design Spec — Awaiting Review
