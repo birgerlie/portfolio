@@ -49,8 +49,8 @@ export function ActivityRings({ clarity, opportunity, marketHealth }: ActivityRi
 
   return (
     <section className="py-32 flex justify-center gap-16 md:gap-24">
-      <Ring value={clarity} color="#3b82f6" label="Clarity" size={140} delay={0} />
-      <Ring value={opportunity} color="#a855f7" label="Opportunity" size={140} delay={0.2} />
+      <Ring value={clarity / 100} color="#3b82f6" label="Clarity" size={140} delay={0} />
+      <Ring value={opportunity / 100} color="#a855f7" label="Opportunity" size={140} delay={0.2} />
       <Ring value={healthValue} color={healthColor} label="Market Health" size={140} delay={0.4} />
     </section>
   );
