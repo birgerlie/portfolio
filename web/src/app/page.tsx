@@ -8,7 +8,7 @@ import { BenchmarkRace } from "@/components/benchmark-race";
 import { PositionList } from "@/components/position-list";
 import { Constellation } from "@/components/constellation";
 
-export const revalidate = 60;
+export const dynamic = "force-dynamic";
 
 export default async function Dashboard() {
   const supabase = await createSupabaseServer();
