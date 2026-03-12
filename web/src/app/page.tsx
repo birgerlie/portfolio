@@ -2,11 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { createSupabaseServer } from "@/lib/supabase-server";
 import { Hero } from "@/components/hero";
 import { NavChart } from "@/components/nav-chart";
-import { ActivityRings } from "@/components/activity-rings";
-import { Narrative } from "@/components/narrative";
-import { BenchmarkRace } from "@/components/benchmark-race";
 import { PositionList } from "@/components/position-list";
-import { Constellation } from "@/components/constellation";
 
 export const dynamic = "force-dynamic";
 
@@ -32,9 +28,7 @@ export default async function Dashboard() {
     );
   }
 
-  const snapshot = await prisma.fundSnapshot.findFirst({
-    orderBy: { date: "desc" },
-  });
+  const snapshot = await prisma.fundSnapshot.findFirst({ orderBy: { date: "desc" } });
 
   const member = user
     ? await prisma.member.findUnique({ where: { authId: user.id } })
@@ -42,11 +36,7 @@ export default async function Dashboard() {
 
   const navHistory = await prisma.weeklyNav.findMany({
     orderBy: { date: "asc" },
-    select: { date: true, nav: true },
-  });
-
-  const latestWeekly = await prisma.weeklyNav.findFirst({
-    orderBy: { date: "desc" },
+    select: { date: true, nav: true, grossReturnPct: true },
   });
 
   const positions = await prisma.position.findMany({
@@ -61,52 +51,49 @@ export default async function Dashboard() {
     ? ((currentValue - member.costBasis) / member.costBasis) * 100
     : 0;
 
-  // Parse benchmarks JSON for the race
-  const benchmarksRaw = latestWeekly?.benchmarks ?? {};
-  const benchmarkEntries = typeof benchmarksRaw === "object" && benchmarksRaw !== null
-    ? Object.entries(benchmarksRaw as Record<string, number>)
-    : [];
-
-  const raceEntries = [
-    { name: "Fund", returnPct: latestWeekly?.grossReturnPct ?? 0, color: "#3b82f6" },
-    ...benchmarkEntries.map(([name, value], i) => ({
-      name,
-      returnPct: typeof value === "number" ? value : 0,
-      color: ["#a855f7", "#22c55e", "#f59e0b", "#ef4444"][i % 4],
-    })),
-  ];
-
-  // Map positions to constellation stars using P&L as conviction proxy, allocation as clarity
-  const maxAlloc = Math.max(...positions.map((p) => p.allocationPct), 0.01);
-  const constellationStars = positions.map((p, i) => ({
-    symbol: p.symbol,
-    allocation: p.allocationPct,
-    conviction: Math.max(0.1, Math.min(0.95, 0.5 + p.unrealizedPlPct / 100)),
-    clarity: Math.max(0.1, Math.min(0.95, p.allocationPct / maxAlloc)),
-  }));
-
-  const narrativeText = latestWeekly?.narrativeSummary
-    || "The market moves in cycles. We move with conviction.";
+  // Fund-level stats
+  const fundNav = snapshot?.nav ?? 0;
+  const cash = snapshot?.cash ?? 0;
+  const cashPct = fundNav > 0 ? (cash / fundNav) * 100 : 0;
+  const totalPl = positions.reduce((sum, p) => sum + p.unrealizedPl, 0);
+  const weeklyReturn = navHistory.length > 0 ? navHistory[navHistory.length - 1].grossReturnPct : 0;
 
   return (
     <div className="pt-14">
       <Hero currentValue={currentValue} returnPct={returnPct} />
+
+      {/* NAV Chart */}
       <section className="max-w-5xl mx-auto px-6 -mt-32">
         <NavChart data={navHistory.map((n) => ({ date: n.date, nav: n.nav }))} />
       </section>
-      <ActivityRings
-        clarity={latestWeekly?.clarityScore ?? 0}
-        opportunity={latestWeekly?.opportunityScore ?? 0}
-        marketHealth={latestWeekly?.marketHealth ?? "green"}
-      />
-      <Narrative text={narrativeText} />
-      <BenchmarkRace entries={raceEntries} />
-      <Constellation stars={constellationStars} />
+
+      {/* Key Numbers */}
+      <section className="max-w-5xl mx-auto px-6 py-16">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <Stat label="Fund NAV" value={`$${fundNav.toLocaleString(undefined, { maximumFractionDigits: 0 })}`} />
+          <Stat label="This Week" value={`${weeklyReturn >= 0 ? "+" : ""}${(weeklyReturn * 100).toFixed(2)}%`} positive={weeklyReturn >= 0} />
+          <Stat label="Unrealized P&L" value={`${totalPl >= 0 ? "+" : ""}$${Math.abs(totalPl).toLocaleString(undefined, { maximumFractionDigits: 0 })}`} positive={totalPl >= 0} />
+          <Stat label="Cash" value={`${cashPct.toFixed(1)}%`} sublabel={`$${cash.toLocaleString(undefined, { maximumFractionDigits: 0 })}`} />
+        </div>
+      </section>
+
+      {/* Positions */}
       <PositionList
         positions={positions}
         totalValue={snapshot?.nav ?? 0}
         cash={snapshot?.cash ?? 0}
       />
+    </div>
+  );
+}
+
+function Stat({ label, value, sublabel, positive }: { label: string; value: string; sublabel?: string; positive?: boolean }) {
+  const color = positive === undefined ? "text-white" : positive ? "text-green-400" : "text-red-400";
+  return (
+    <div className="bg-zinc-900/50 rounded-xl p-4 border border-zinc-800">
+      <span className="text-xs text-zinc-500 uppercase tracking-wider">{label}</span>
+      <p className={`text-2xl font-light mt-1 ${color}`}>{value}</p>
+      {sublabel && <p className="text-xs text-zinc-600 mt-0.5">{sublabel}</p>}
     </div>
   );
 }
