@@ -58,12 +58,13 @@ export default async function Dashboard() {
     })),
   ];
 
-  // Map positions to constellation stars (conviction/clarity as placeholder 0.5)
-  const constellationStars = positions.map((p) => ({
+  // Map positions to constellation stars using P&L as conviction proxy, allocation as clarity
+  const maxAlloc = Math.max(...positions.map((p) => p.allocationPct), 0.01);
+  const constellationStars = positions.map((p, i) => ({
     symbol: p.symbol,
     allocation: p.allocationPct,
-    conviction: 0.5,
-    clarity: 0.5,
+    conviction: Math.max(0.1, Math.min(0.95, 0.5 + p.unrealizedPlPct / 100)),
+    clarity: Math.max(0.1, Math.min(0.95, p.allocationPct / maxAlloc)),
   }));
 
   const narrativeText = latestWeekly?.narrativeSummary
