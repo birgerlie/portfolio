@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
@@ -30,12 +33,35 @@ _DECISION_SYSTEM = (
 )
 
 
+class _DiskCache:
+    """Simple content-hash disk cache for synthesis results."""
+
+    def __init__(self, cache_dir: str = "/tmp/fund-synthesis-cache"):
+        self._dir = Path(cache_dir)
+        self._dir.mkdir(parents=True, exist_ok=True)
+
+    def _key(self, system: str, prompt: str) -> str:
+        h = hashlib.sha256(f"{system}\n---\n{prompt}".encode()).hexdigest()[:16]
+        return h
+
+    def get(self, system: str, prompt: str) -> Optional[str]:
+        path = self._dir / f"{self._key(system, prompt)}.txt"
+        if path.exists():
+            return path.read_text()
+        return None
+
+    def put(self, system: str, prompt: str, result: str) -> None:
+        path = self._dir / f"{self._key(system, prompt)}.txt"
+        path.write_text(result)
+
+
 class BeliefSynthesizer:
     """Generate human-readable narratives from the epistemic engine's belief state."""
 
-    def __init__(self, api_key: str, model: str = "gpt-4o-mini") -> None:
+    def __init__(self, api_key: str, model: str = "gpt-4o-mini", cache: bool = True) -> None:
         self._client = OpenAI(api_key=api_key)
         self.model = model
+        self._cache = _DiskCache() if cache else None
 
     # ── public API ──────────────────────────────────────────────────────────
 
@@ -148,6 +174,13 @@ class BeliefSynthesizer:
     # ── internal ─────────────────────────────────────────────────────────────
 
     def _complete(self, system: str, user: str, fallback: str) -> str:
+        # Check cache first
+        if self._cache:
+            cached = self._cache.get(system, user)
+            if cached is not None:
+                logger.debug("Cache hit for synthesis request")
+                return cached
+
         try:
             resp = self._client.chat.completions.create(
                 model=self.model,
@@ -158,7 +191,13 @@ class BeliefSynthesizer:
                 max_tokens=300,
                 temperature=0.4,
             )
-            return resp.choices[0].message.content.strip()
+            result = resp.choices[0].message.content.strip()
+
+            # Cache the result
+            if self._cache:
+                self._cache.put(system, user, result)
+
+            return result
         except Exception as exc:
             logger.warning("BeliefSynthesizer OpenAI error: %s", exc)
             return fallback

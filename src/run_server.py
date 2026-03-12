@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from fund.types import Fund, Instrument, WeeklyNAV
 from fund.mock_broker import MockBroker
-from fund.mock_synthesizer import MockSynthesizer
+from fund.belief_synthesizer import BeliefSynthesizer
 from fund.universe import InvestmentUniverse
 from fund.journal import EventJournal
 from fund.thermo_metrics import ThermoMetrics
@@ -235,7 +235,14 @@ def main():
     thermo = ThermoMetrics()
     benchmarks = BenchmarkEngine()
     health = HealthMonitor()
-    synthesizer = MockSynthesizer()
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+    if openai_key:
+        synthesizer = BeliefSynthesizer(api_key=openai_key, model="gpt-4o-mini")
+        print("  Synthesizer:     OpenAI gpt-4o-mini (cached)")
+    else:
+        from fund.mock_synthesizer import MockSynthesizer
+        synthesizer = MockSynthesizer()
+        print("  Synthesizer:     Mock (no OPENAI_API_KEY set)")
 
     nav_history = build_weekly_nav_history(fund.nav)
 
