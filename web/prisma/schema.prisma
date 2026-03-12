@@ -1,0 +1,166 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ── Fund State ─────────────────────────────────────────────
+
+model FundSnapshot {
+  id             String   @id @default(cuid())
+  date           String   @unique
+  nav            Float
+  navPerUnit     Float    @map("nav_per_unit")
+  unitsOutstanding Float  @map("units_outstanding")
+  highWaterMark  Float    @map("high_water_mark")
+  cash           Float
+  positionsCount Int      @map("positions_count")
+  updatedAt      DateTime @map("updated_at") @default(now())
+
+  @@map("fund_snapshots")
+}
+
+// ── Engine Heartbeat ───────────────────────────────────────
+
+model EngineHeartbeat {
+  id              String   @id @default("singleton")
+  status          String   // running / degraded / stopped
+  alpacaConnected Boolean  @map("alpaca_connected")
+  lastTrade       DateTime? @map("last_trade")
+  activePositions Int      @map("active_positions")
+  currentRegime   String   @map("current_regime")
+  nextAction      String   @map("next_action")
+  nextActionAt    DateTime? @map("next_action_at")
+  updatedAt       DateTime @map("updated_at") @default(now())
+
+  @@map("engine_heartbeat")
+}
+
+// ── Positions ──────────────────────────────────────────────
+
+model Position {
+  id              String   @id @default(cuid())
+  symbol          String   @unique
+  quantity        Float
+  marketValue     Float    @map("market_value")
+  avgEntryPrice   Float    @map("avg_entry_price")
+  currentPrice    Float    @map("current_price")
+  unrealizedPl    Float    @map("unrealized_pl")
+  unrealizedPlPct Float    @map("unrealized_pl_pct")
+  allocationPct   Float    @map("allocation_pct")
+  updatedAt       DateTime @map("updated_at") @default(now())
+
+  @@map("positions")
+}
+
+// ── Journals ───────────────────────────────────────────────
+
+model Journal {
+  id              String   @id @default(cuid())
+  date            String   @unique
+  entries         Json
+  regimeSummary   String   @map("regime_summary") @default("")
+  tradesExecuted  Int      @map("trades_executed") @default(0)
+  navChangePct    Float    @map("nav_change_pct") @default(0)
+  beliefSnapshot  Json?    @map("belief_snapshot")
+  thermoSnapshot  Json?    @map("thermo_snapshot")
+  updatedAt       DateTime @map("updated_at") @default(now())
+
+  @@map("journals")
+}
+
+// ── Members ────────────────────────────────────────────────
+
+model Member {
+  id           String   @id @default(cuid())
+  authId       String   @unique @map("auth_id")
+  name         String
+  email        String   @unique
+  role         String   @default("member")
+  units        Float    @default(0)
+  costBasis    Float    @map("cost_basis") @default(0)
+  joinDate     DateTime @map("join_date") @default(now())
+  createdAt    DateTime @map("created_at") @default(now())
+
+  transactions Transaction[]
+  subscriptions StripeSubscription[]
+
+  @@map("members")
+}
+
+// ── Transactions ───────────────────────────────────────────
+
+model Transaction {
+  id              String   @id @default(cuid())
+  memberId        String   @map("member_id")
+  type            String   // subscribe / redeem
+  units           Float
+  navPerUnit      Float    @map("nav_per_unit")
+  amount          Float
+  managementFee   Float    @map("management_fee") @default(0)
+  performanceFee  Float    @map("performance_fee") @default(0)
+  status          String   @default("pending")
+  createdAt       DateTime @map("created_at") @default(now())
+
+  member          Member   @relation(fields: [memberId], references: [id])
+
+  @@map("transactions")
+}
+
+// ── Stripe ─────────────────────────────────────────────────
+
+model StripeSubscription {
+  id                String   @id @default(cuid())
+  memberId          String   @map("member_id")
+  stripeCustomerId  String   @map("stripe_customer_id")
+  stripePaymentIntentId String? @map("stripe_payment_intent_id")
+  amount            Float
+  status            String   @default("pending")
+  windowDate        DateTime @map("window_date")
+  createdAt         DateTime @map("created_at") @default(now())
+
+  member            Member   @relation(fields: [memberId], references: [id])
+
+  @@map("stripe_subscriptions")
+}
+
+// ── Weekly NAV History ─────────────────────────────────────
+
+model WeeklyNav {
+  id              String   @id @default(cuid())
+  date            String   @unique
+  nav             Float
+  navPerUnit      Float    @map("nav_per_unit")
+  grossReturnPct  Float    @map("gross_return_pct")
+  netReturnPct    Float    @map("net_return_pct")
+  mgmtFeeAccrued  Float    @map("mgmt_fee_accrued")
+  perfFeeAccrued  Float    @map("perf_fee_accrued")
+  highWaterMark   Float    @map("high_water_mark")
+  clarityScore    Float    @map("clarity_score") @default(0)
+  opportunityScore Float   @map("opportunity_score") @default(0)
+  captureRate     Float    @map("capture_rate") @default(0)
+  marketHealth    String   @map("market_health") @default("green")
+  momentum        String   @default("steady")
+  benchmarks      Json     @default("{}")
+  narrativeSummary String  @map("narrative_summary") @default("")
+  createdAt       DateTime @map("created_at") @default(now())
+
+  @@map("weekly_nav")
+}
+
+// ── Investment Universe ────────────────────────────────────
+
+model Instrument {
+  id          String   @id @default(cuid())
+  symbol      String   @unique
+  name        String
+  assetClass  String   @map("asset_class")
+  thesis      String
+  proposedBy  String   @map("proposed_by")
+  addedDate   DateTime @map("added_date") @default(now())
+  votesFor    Int      @map("votes_for") @default(0)
+
+  @@map("instruments")
+}
