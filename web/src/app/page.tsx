@@ -103,6 +103,10 @@ function EngineAnalysis({ journal, regime }: { journal: { regimeSummary: string;
   const overallConfidence = entries.overall_confidence as number ?? 0;
   const trades = (entries.trades as Array<{ type: string; symbol: string; allocation: number; reason: string }>) ?? [];
   const detectedRegime = (entries.regime as string) ?? regime;
+  const silicondb = entries.silicondb as Record<string, unknown> | null;
+  const contradictions = (silicondb?.contradictions as Array<{ a: string; b: string; score: number }>) ?? [];
+  const uncertainBeliefs = (silicondb?.uncertain as Array<{ id: string; entropy: number }>) ?? [];
+  const beliefEngine = (entries.belief_engine as string) ?? "local";
 
   const regimeColors: Record<string, string> = {
     bull: "text-green-400",
@@ -148,7 +152,7 @@ function EngineAnalysis({ journal, regime }: { journal: { regimeSummary: string;
 
         {/* Trade Suggestions */}
         {trades.length > 0 && (
-          <div>
+          <div className="mb-6">
             <span className="text-xs text-zinc-500 mb-2 block">Suggested Trades</span>
             <div className="space-y-1.5">
               {trades.map((t, i) => (
@@ -164,6 +168,48 @@ function EngineAnalysis({ journal, regime }: { journal: { regimeSummary: string;
             </div>
           </div>
         )}
+
+        {/* SiliconDB Epistemology Insights */}
+        {(contradictions.length > 0 || uncertainBeliefs.length > 0) && (
+          <div className="border-t border-zinc-800 pt-4 mt-2">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="text-xs text-zinc-500 uppercase tracking-wider">Epistemology</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500">SiliconDB</span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {contradictions.length > 0 && (
+                <div>
+                  <span className="text-xs text-red-400/70 mb-1.5 block">Contradictions Detected</span>
+                  {contradictions.map((c, i) => (
+                    <div key={i} className="text-xs text-zinc-400 flex justify-between py-0.5">
+                      <span>{c.a.replace("belief:", "").replace(":return", "")} vs {c.b.replace("belief:", "").replace(":return", "")}</span>
+                      <span className="text-red-400/60">{(c.score * 100).toFixed(0)}%</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {uncertainBeliefs.length > 0 && (
+                <div>
+                  <span className="text-xs text-yellow-400/70 mb-1.5 block">High Uncertainty (needs data)</span>
+                  {uncertainBeliefs.map((u, i) => (
+                    <div key={i} className="text-xs text-zinc-400 flex justify-between py-0.5">
+                      <span>{u.id.replace("belief:", "").replace(":return", "")}</span>
+                      <span className="text-yellow-400/60">entropy {u.entropy.toFixed(2)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Belief engine indicator */}
+        <div className="mt-4 pt-3 border-t border-zinc-800/50 flex items-center gap-2">
+          <div className={`w-1.5 h-1.5 rounded-full ${beliefEngine === "silicondb" ? "bg-blue-400" : "bg-zinc-600"}`} />
+          <span className="text-[10px] text-zinc-600">
+            {beliefEngine === "silicondb" ? "Beliefs powered by SiliconDB epistemology" : "Local belief classification"}
+          </span>
+        </div>
       </div>
     </section>
   );

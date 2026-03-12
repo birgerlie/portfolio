@@ -361,12 +361,14 @@ def main():
         print("\n  Supabase sync skipped (no SUPABASE_SERVICE_ROLE_KEY set)")
 
     # ── Start live engine (continuous analysis loop) ──────────
+    silicondb_url = os.environ.get("SILICONDB_URL", "http://127.0.0.1:8642")
     live = LiveEngine(
         symbols=PORTFOLIO_SYMBOLS,
         fund=fund,
         supabase=supabase,
         synthesizer=synthesizer,
         interval_seconds=300,  # every 5 minutes
+        silicondb_url=silicondb_url,
     )
     live.start()
 

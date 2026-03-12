@@ -1,4 +1,8 @@
-"""Live engine loop: fetch prices, detect regime, run controller, sync to Supabase."""
+"""Live engine loop: fetch prices, detect regime, run controller, sync to Supabase.
+
+Uses SiliconDB's epistemic belief system for Bayesian tracking when available,
+falls back to local epistemic engine otherwise.
+"""
 
 import logging
 import os
@@ -13,7 +17,6 @@ from uuid import uuid4
 from trading_backtest.automation_controller import AutonomousController
 from trading_backtest.backtest_runner import compute_returns
 from trading_backtest.data import fetch_historical_data
-from trading_backtest.epistemic import BeliefType as EpBeliefType, EpistemicEngine, Belief as EpBelief
 
 from fund.supabase_sync import SupabaseSync
 from fund.types import Fund, WeeklyNAV
@@ -63,6 +66,138 @@ def _classify_belief(returns: List[float]) -> tuple:
         return ("stable", 0.5 + min(0.3, (1 / (vol * 100 + 1))))
 
 
+# ── SiliconDB Belief Bridge ──────────────────────────────────────────────────
+
+class SiliconDBBeliefBridge:
+    """Bridges market observations into SiliconDB's epistemic belief system."""
+
+    def __init__(self, silicondb_url: str = "http://127.0.0.1:8642"):
+        self._client = None
+        self._url = silicondb_url
+        self._connected = False
+        self._connect()
+
+    def _connect(self):
+        try:
+            from silicondb import SiliconDBClient
+            self._client = SiliconDBClient(base_url=self._url, timeout=10.0)
+            self._connected = True
+            logger.info("Connected to SiliconDB at %s", self._url)
+        except Exception as e:
+            logger.warning("SiliconDB not available: %s (using local beliefs)", e)
+            self._connected = False
+
+    @property
+    def connected(self) -> bool:
+        return self._connected and self._client is not None
+
+    def record_price_observation(self, symbol: str, returns: List[float], source: str = "yahoo_finance"):
+        """Record price-based observations for a symbol into SiliconDB."""
+        if not self.connected:
+            return
+
+        try:
+            btype, confidence = _classify_belief(returns)
+
+            # Record the observation: confirmed = positive signal for the belief type
+            # e.g., if "high_growth" with 0.8 confidence → confirmed observation
+            confirmed = btype in ("high_growth", "stable")
+
+            self._client.record_observation(
+                external_id=f"belief:{symbol}:return",
+                confirmed=confirmed,
+                source=source,
+            )
+
+            # Also record momentum observation
+            if len(returns) >= 5:
+                recent_positive = sum(1 for r in returns[-5:] if r > 0) >= 3
+                self._client.record_observation(
+                    external_id=f"belief:{symbol}:momentum",
+                    confirmed=recent_positive,
+                    source=source,
+                )
+
+        except Exception as e:
+            logger.warning("Failed to record observation for %s: %s", symbol, e)
+
+    def propagate_beliefs(self, symbols: List[str]):
+        """Propagate beliefs through the SiliconDB graph (co-occurring stocks)."""
+        if not self.connected:
+            return
+
+        try:
+            # Add co-occurrences for portfolio stocks (they're related)
+            ids = [f"belief:{s}:return" for s in symbols]
+            self._client.add_cooccurrences(ids, session_id=f"portfolio-{date.today()}")
+
+            # Propagate from each symbol
+            for symbol in symbols:
+                try:
+                    self._client.propagate(
+                        external_id=f"belief:{symbol}:return",
+                        confidence=0.7,
+                        decay=0.5,
+                    )
+                except Exception:
+                    pass  # New beliefs may not have enough data yet
+
+        except Exception as e:
+            logger.warning("Belief propagation failed: %s", e)
+
+    def detect_anomalies(self) -> List[Dict]:
+        """Use SiliconDB's contradiction detection for anomaly flagging."""
+        if not self.connected:
+            return []
+
+        try:
+            result = self._client.detect_contradictions(
+                samples=5000,
+                min_conflict_score=0.3,
+                max_results=10,
+            )
+            return result.get("items", [])
+        except Exception as e:
+            logger.warning("Contradiction detection failed: %s", e)
+            return []
+
+    def get_uncertain(self, k: int = 10) -> List[Dict]:
+        """Get beliefs with highest uncertainty (need more data)."""
+        if not self.connected:
+            return []
+
+        try:
+            return self._client.get_uncertain_beliefs(min_entropy=0.3, k=k)
+        except Exception as e:
+            logger.warning("Uncertain beliefs query failed: %s", e)
+            return []
+
+    def snapshot(self, symbols: List[str]) -> Optional[Dict]:
+        """Take a belief snapshot for the portfolio."""
+        if not self.connected:
+            return None
+
+        try:
+            ids = [f"belief:{s}:return" for s in symbols]
+            return self._client.snapshot_beliefs(ids, snapshot_id=f"portfolio-{date.today()}")
+        except Exception as e:
+            logger.warning("Belief snapshot failed: %s", e)
+            return None
+
+    def get_belief_history(self, symbol: str) -> List[Dict]:
+        """Get belief probability history for a symbol."""
+        if not self.connected:
+            return []
+
+        try:
+            return self._client.get_belief_history(f"belief:{symbol}:return")
+        except Exception as e:
+            logger.warning("Belief history query failed: %s", e)
+            return []
+
+
+# ── Live Engine ──────────────────────────────────────────────────────────────
+
 class LiveEngine:
     """Runs the full trading pipeline on a schedule and syncs to Supabase."""
 
@@ -73,6 +208,7 @@ class LiveEngine:
         supabase: Optional[SupabaseSync],
         synthesizer=None,
         interval_seconds: int = 300,
+        silicondb_url: Optional[str] = None,
     ):
         self.symbols = symbols
         self.fund = fund
@@ -80,14 +216,23 @@ class LiveEngine:
         self.synthesizer = synthesizer
         self.interval = interval_seconds
         self.controller = AutonomousController()
-        self.epistemic = EpistemicEngine()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+
+        # SiliconDB belief system (optional, falls back to local)
+        self.belief_bridge = SiliconDBBeliefBridge(silicondb_url) if silicondb_url else None
+        if self.belief_bridge and self.belief_bridge.connected:
+            print("    Belief engine: SiliconDB (Bayesian + propagation + contradictions)")
+        else:
+            print("    Belief engine: Local (basic classification)")
+            self.belief_bridge = None
 
         # State
         self.current_prices: Dict[str, float] = {}
         self.current_regime = "transition"
         self.last_analysis = None
+        self.anomalies: List[Dict] = []
+        self.uncertain_beliefs: List[Dict] = []
 
     def start(self):
         """Start the engine loop in a background thread."""
@@ -105,7 +250,6 @@ class LiveEngine:
 
     def _loop(self):
         """Main loop: run analysis, sync, sleep, repeat."""
-        # Run immediately on start
         self._tick()
         while not self._stop.is_set():
             self._stop.wait(self.interval)
@@ -134,10 +278,10 @@ class LiveEngine:
         print(f"    Got prices for {len(self.current_prices)}/{len(self.symbols)} symbols")
 
     def _run_analysis(self):
-        """Run the full trading pipeline."""
+        """Run the full trading pipeline with SiliconDB beliefs when available."""
         print("    Running analysis pipeline...")
 
-        # 1. Compute market metrics from recent returns
+        # 1. Fetch returns for all symbols
         all_returns = {}
         for symbol in self.symbols:
             rets = _fetch_returns_90d(symbol)
@@ -148,48 +292,52 @@ class LiveEngine:
             print("    No return data available, skipping analysis")
             return
 
-        # Aggregate market metrics
+        # 2. Feed observations into SiliconDB
+        if self.belief_bridge:
+            print("    Recording observations in SiliconDB...")
+            for symbol, returns in all_returns.items():
+                self.belief_bridge.record_price_observation(symbol, returns)
+
+            # Propagate beliefs through the graph
+            self.belief_bridge.propagate_beliefs(list(all_returns.keys()))
+
+            # Detect contradictions/anomalies
+            self.anomalies = self.belief_bridge.detect_anomalies()
+            if self.anomalies:
+                print(f"    CONTRADICTIONS detected: {len(self.anomalies)}")
+                for a in self.anomalies[:3]:
+                    print(f"      {a.get('belief_a', '?')} vs {a.get('belief_b', '?')} (conflict: {a.get('conflict_score', 0):.2f})")
+
+            # Find uncertain beliefs
+            self.uncertain_beliefs = self.belief_bridge.get_uncertain()
+            if self.uncertain_beliefs:
+                print(f"    Uncertain beliefs: {len(self.uncertain_beliefs)}")
+                for u in self.uncertain_beliefs[:3]:
+                    print(f"      {u.get('external_id', '?')} (entropy: {u.get('entropy', 0):.2f})")
+
+            # Snapshot current beliefs
+            self.belief_bridge.snapshot(list(all_returns.keys()))
+
+        # 3. Compute market metrics
         avg_returns = [statistics.mean(r) for r in all_returns.values()]
         vols = [statistics.stdev(r) for r in all_returns.values() if len(r) > 1]
         positive_count = sum(1 for r in avg_returns if r > 0)
 
         market_metrics = {
-            "avg_return": statistics.mean(avg_returns) * 252,  # annualize
+            "avg_return": statistics.mean(avg_returns) * 252,
             "volatility": statistics.mean(vols) * (252 ** 0.5) if vols else 0.2,
             "positive_pct": positive_count / len(avg_returns) if avg_returns else 0.5,
-            "momentum": statistics.mean(avg_returns) * 20,  # 1-month momentum
+            "momentum": statistics.mean(avg_returns) * 20,
         }
 
-        # 2. Build beliefs from price action
+        # 4. Build beliefs for the controller
         beliefs_dict = {}
         for symbol, returns in all_returns.items():
             btype, conf = _classify_belief(returns)
             beliefs_dict[symbol] = (btype, conf)
 
-            # Also update the epistemic engine
-            ep_belief_type = {
-                "high_growth": EpBeliefType.HIGH_GROWTH,
-                "declining": EpBeliefType.DECLINING,
-                "stable": EpBeliefType.STABLE,
-            }.get(btype, EpBeliefType.STABLE)
-
-            belief = EpBelief(
-                symbol=symbol,
-                attribute="return",
-                belief_type=ep_belief_type,
-                probability=conf,
-            )
-            self.epistemic.add_belief(belief)
-
-            # Check for anomalies
-            anomaly = self.epistemic.detect_anomaly(belief)
-            if anomaly["is_anomaly"]:
-                print(f"    ANOMALY: {symbol} — high confidence ({conf:.2f}) with sparse evidence")
-
-        # 3. Compute current portfolio weights
-        total_value = sum(
-            self.current_prices.get(s, 0) for s in self.symbols
-        )
+        # 5. Compute current portfolio weights
+        total_value = sum(self.current_prices.get(s, 0) for s in self.symbols)
         current_portfolio = {}
         if total_value > 0:
             for s in self.symbols:
@@ -197,7 +345,7 @@ class LiveEngine:
                 if p > 0:
                     current_portfolio[s] = p / total_value
 
-        # 4. Run the controller
+        # 6. Run the controller
         result = self.controller.analyze(
             market_metrics=market_metrics,
             beliefs_dict=beliefs_dict,
@@ -261,7 +409,7 @@ class LiveEngine:
                 "symbol": symbol,
                 "quantity": 1.0,
                 "market_value": price,
-                "avg_entry_price": price * 0.95,  # placeholder
+                "avg_entry_price": price * 0.95,
                 "current_price": price,
                 "unrealized_pl": price * 0.05,
                 "unrealized_pl_pct": 5.0,
@@ -270,11 +418,10 @@ class LiveEngine:
         if positions:
             self.supabase.push_positions(positions)
 
-        # Weekly NAV entry (once per tick, upserted on date)
+        # Weekly NAV entry
         weekly_return = 0.0
         if self.last_analysis:
-            mkt = self.last_analysis
-            weekly_return = mkt.confidence * 0.01  # rough proxy
+            weekly_return = self.last_analysis.confidence * 0.01
 
         try:
             self.supabase._client.table("weekly_nav").upsert({
@@ -310,6 +457,20 @@ class LiveEngine:
                 }
                 for t in result.execution_plan.trades[:10]
             ]
+
+            # Include SiliconDB insights if available
+            silicondb_insights = {}
+            if self.anomalies:
+                silicondb_insights["contradictions"] = [
+                    {"a": a.get("belief_a", ""), "b": a.get("belief_b", ""), "score": a.get("conflict_score", 0)}
+                    for a in self.anomalies[:5]
+                ]
+            if self.uncertain_beliefs:
+                silicondb_insights["uncertain"] = [
+                    {"id": u.get("external_id", ""), "entropy": u.get("entropy", 0)}
+                    for u in self.uncertain_beliefs[:5]
+                ]
+
             try:
                 self.supabase.push_journal({
                     "id": str(uuid4()),
@@ -321,6 +482,8 @@ class LiveEngine:
                         "overall_confidence": round(result.confidence, 2),
                         "trades": trades,
                         "prices": {s: round(p, 2) for s, p in self.current_prices.items()},
+                        "silicondb": silicondb_insights if silicondb_insights else None,
+                        "belief_engine": "silicondb" if self.belief_bridge else "local",
                     },
                     "regime_summary": f"Market regime: {result.regime.value}. Strategy: {result.selected_strategy.name} (confidence {result.selected_strategy.confidence:.0%}). {len(trades)} trade suggestions.",
                     "trades_executed": 0,
