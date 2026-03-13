@@ -13,29 +13,85 @@ interface Member {
   _count: { transactions: number };
 }
 
+interface FundStats {
+  fund: {
+    nav: number;
+    navPerUnit: number;
+    unitsOutstanding: number;
+    cash: number;
+    highWaterMark: number;
+    positionsCount: number;
+    date: string | null;
+  };
+  capital: {
+    totalInvested: number;
+    totalRedeemed: number;
+    netInvested: number;
+    totalUnits: number;
+    totalCostBasis: number;
+    memberCount: number;
+  };
+  fees: {
+    realizedMgmt: number;
+    realizedPerf: number;
+    realizedTotal: number;
+    accruedMgmt: number;
+    accruedPerf: number;
+    accruedTotal: number;
+    grandTotal: number;
+  };
+  transactions: {
+    total: number;
+    completed: number;
+    pending: number;
+  };
+}
+
+function fmt(n: number): string {
+  return n.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 0, maximumFractionDigits: 0 });
+}
+
+function fmtPct(n: number): string {
+  return `${(n * 100).toFixed(2)}%`;
+}
+
+function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return (
+    <div>
+      <p className="text-xs text-zinc-500 mb-1">{label}</p>
+      <p className="text-xl font-light text-zinc-100">{value}</p>
+      {sub && <p className="text-xs text-zinc-500 mt-0.5">{sub}</p>}
+    </div>
+  );
+}
+
 export default function AdminPage() {
   const [members, setMembers] = useState<Member[]>([]);
+  const [stats, setStats] = useState<FundStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  // Invite form
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteName, setInviteName] = useState("");
   const [inviting, setInviting] = useState(false);
   const [inviteMsg, setInviteMsg] = useState("");
 
-  async function fetchMembers() {
-    const res = await fetch("/api/admin/members");
-    if (!res.ok) {
-      setError(res.status === 401 ? "Not authenticated" : res.status === 403 ? "Not authorized" : "Failed to load");
+  async function fetchAll() {
+    const [membersRes, statsRes] = await Promise.all([
+      fetch("/api/admin/members"),
+      fetch("/api/admin/stats"),
+    ]);
+    if (!membersRes.ok) {
+      setError(membersRes.status === 401 ? "Not authenticated" : membersRes.status === 403 ? "Not authorized" : "Failed to load");
       setLoading(false);
       return;
     }
-    setMembers(await res.json());
+    setMembers(await membersRes.json());
+    if (statsRes.ok) setStats(await statsRes.json());
     setLoading(false);
   }
 
-  useEffect(() => { fetchMembers(); }, []);
+  useEffect(() => { fetchAll(); }, []);
 
   async function sendInvite(e: React.FormEvent) {
     e.preventDefault();
@@ -64,7 +120,7 @@ export default function AdminPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id: member.id, role: newRole }),
     });
-    fetchMembers();
+    fetchAll();
   }
 
   async function removeMember(member: Member) {
@@ -74,19 +130,83 @@ export default function AdminPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id: member.id }),
     });
-    fetchMembers();
+    fetchAll();
   }
 
-  if (loading) return <div className="min-h-screen pt-28 px-6 max-w-4xl mx-auto"><p className="text-zinc-500">Loading...</p></div>;
-  if (error) return <div className="min-h-screen pt-28 px-6 max-w-4xl mx-auto"><p className="text-red-400">{error}</p></div>;
+  if (loading) return <div className="min-h-screen pt-28 px-6 max-w-5xl mx-auto"><p className="text-zinc-500">Loading...</p></div>;
+  if (error) return <div className="min-h-screen pt-28 px-6 max-w-5xl mx-auto"><p className="text-red-400">{error}</p></div>;
+
+  const unrealizedGain = stats ? stats.fund.nav - stats.capital.totalCostBasis : 0;
+  const unrealizedPct = stats && stats.capital.totalCostBasis > 0 ? unrealizedGain / stats.capital.totalCostBasis : 0;
 
   return (
-    <div className="min-h-screen pt-28 px-6 max-w-4xl mx-auto pb-20">
+    <div className="min-h-screen pt-28 px-6 max-w-5xl mx-auto pb-20">
       <h1 className="text-4xl font-light mb-2">Admin</h1>
-      <p className="text-zinc-500 mb-12">Manage members and send invitations</p>
+      <p className="text-zinc-500 mb-10">Fund overview, fees, and member management</p>
+
+      {/* Fund Overview */}
+      {stats && (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-6 mb-8">
+            <div className="bg-zinc-900/50 rounded-xl border border-zinc-800 p-5">
+              <Stat label="Net Asset Value" value={fmt(stats.fund.nav)} sub={`${stats.fund.positionsCount} positions`} />
+            </div>
+            <div className="bg-zinc-900/50 rounded-xl border border-zinc-800 p-5">
+              <Stat label="NAV / Unit" value={`$${stats.fund.navPerUnit.toFixed(2)}`} sub={`HWM $${stats.fund.highWaterMark.toFixed(2)}`} />
+            </div>
+            <div className="bg-zinc-900/50 rounded-xl border border-zinc-800 p-5">
+              <Stat label="Cash" value={fmt(stats.fund.cash)} sub={stats.fund.nav > 0 ? `${((stats.fund.cash / stats.fund.nav) * 100).toFixed(1)}% of NAV` : undefined} />
+            </div>
+            <div className="bg-zinc-900/50 rounded-xl border border-zinc-800 p-5">
+              <Stat
+                label="Unrealized P&L"
+                value={fmt(unrealizedGain)}
+                sub={stats.capital.totalCostBasis > 0 ? fmtPct(unrealizedPct) : undefined}
+              />
+            </div>
+          </div>
+
+          {/* Capital & Fees */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-10">
+            {/* Capital */}
+            <div className="bg-zinc-900/50 rounded-xl border border-zinc-800 p-5">
+              <h3 className="text-xs text-zinc-500 uppercase tracking-wider mb-4">Capital</h3>
+              <div className="grid grid-cols-2 gap-4">
+                <Stat label="Total Invested" value={fmt(stats.capital.totalInvested)} />
+                <Stat label="Total Redeemed" value={fmt(stats.capital.totalRedeemed)} />
+                <Stat label="Net Invested" value={fmt(stats.capital.netInvested)} />
+                <Stat label="Cost Basis" value={fmt(stats.capital.totalCostBasis)} />
+                <Stat label="Units Outstanding" value={stats.fund.unitsOutstanding.toFixed(2)} />
+                <Stat label="Members" value={String(stats.capital.memberCount)} />
+              </div>
+            </div>
+
+            {/* Fees / Admin Earnings */}
+            <div className="bg-zinc-900/50 rounded-xl border border-zinc-800 p-5">
+              <h3 className="text-xs text-zinc-500 uppercase tracking-wider mb-4">Admin Earnings (Fees)</h3>
+              <div className="grid grid-cols-2 gap-4">
+                <Stat label="Management (realized)" value={fmt(stats.fees.realizedMgmt)} />
+                <Stat label="Performance (realized)" value={fmt(stats.fees.realizedPerf)} />
+                <Stat label="Management (accrued)" value={fmt(stats.fees.accruedMgmt)} />
+                <Stat label="Performance (accrued)" value={fmt(stats.fees.accruedPerf)} />
+              </div>
+              <div className="mt-4 pt-4 border-t border-zinc-800 flex justify-between items-end">
+                <div>
+                  <p className="text-xs text-zinc-500">Total Earned</p>
+                  <p className="text-2xl font-light text-emerald-400">{fmt(stats.fees.grandTotal)}</p>
+                </div>
+                <div className="text-right">
+                  <p className="text-xs text-zinc-500">Transactions</p>
+                  <p className="text-sm text-zinc-300">{stats.transactions.completed} settled · {stats.transactions.pending} pending</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
 
       {/* Invite Section */}
-      <div className="bg-zinc-900/50 rounded-2xl border border-zinc-800 p-6 mb-12">
+      <div className="bg-zinc-900/50 rounded-xl border border-zinc-800 p-6 mb-10">
         <h2 className="text-lg font-medium mb-4">Send Magic Link</h2>
         <form onSubmit={sendInvite} className="flex flex-col sm:flex-row gap-3">
           <input
@@ -114,43 +234,47 @@ export default function AdminPage() {
       {/* Members Table */}
       <h2 className="text-lg font-medium mb-4">Members ({members.length})</h2>
       {members.length > 0 ? (
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-zinc-500 border-b border-zinc-800">
-              <th className="text-left py-3 font-normal">Name</th>
-              <th className="text-left py-3 font-normal">Email</th>
-              <th className="text-left py-3 font-normal">Role</th>
-              <th className="text-right py-3 font-normal">Units</th>
-              <th className="text-right py-3 font-normal">Txns</th>
-              <th className="text-right py-3 font-normal">Joined</th>
-              <th className="text-right py-3 font-normal"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {members.map((m) => (
-              <tr key={m.id} className="border-b border-zinc-800/50">
-                <td className="py-3 font-medium">{m.name}</td>
-                <td className="py-3 text-zinc-400">{m.email}</td>
-                <td className="py-3">
-                  <span className={`text-xs px-2 py-0.5 rounded-full ${m.role === "admin" ? "bg-blue-500/20 text-blue-400" : "bg-zinc-800 text-zinc-400"}`}>
-                    {m.role}
-                  </span>
-                </td>
-                <td className="text-right py-3 text-zinc-400">{m.units.toFixed(1)}</td>
-                <td className="text-right py-3 text-zinc-400">{m._count.transactions}</td>
-                <td className="text-right py-3 text-zinc-500">{new Date(m.joinDate).toLocaleDateString()}</td>
-                <td className="text-right py-3 space-x-2">
-                  <button onClick={() => toggleRole(m)} className="text-xs text-zinc-500 hover:text-white transition-colors">
-                    {m.role === "admin" ? "Demote" : "Promote"}
-                  </button>
-                  <button onClick={() => removeMember(m)} className="text-xs text-zinc-500 hover:text-red-400 transition-colors">
-                    Remove
-                  </button>
-                </td>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-zinc-500 border-b border-zinc-800">
+                <th className="text-left py-3 font-normal">Name</th>
+                <th className="text-left py-3 font-normal">Email</th>
+                <th className="text-left py-3 font-normal">Role</th>
+                <th className="text-right py-3 font-normal">Units</th>
+                <th className="text-right py-3 font-normal">Cost Basis</th>
+                <th className="text-right py-3 font-normal">Txns</th>
+                <th className="text-right py-3 font-normal">Joined</th>
+                <th className="text-right py-3 font-normal"></th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {members.map((m) => (
+                <tr key={m.id} className="border-b border-zinc-800/50">
+                  <td className="py-3 font-medium">{m.name}</td>
+                  <td className="py-3 text-zinc-400">{m.email}</td>
+                  <td className="py-3">
+                    <span className={`text-xs px-2 py-0.5 rounded-full ${m.role === "admin" ? "bg-blue-500/20 text-blue-400" : "bg-zinc-800 text-zinc-400"}`}>
+                      {m.role}
+                    </span>
+                  </td>
+                  <td className="text-right py-3 text-zinc-400">{m.units.toFixed(2)}</td>
+                  <td className="text-right py-3 text-zinc-400">{fmt(m.costBasis)}</td>
+                  <td className="text-right py-3 text-zinc-400">{m._count.transactions}</td>
+                  <td className="text-right py-3 text-zinc-500">{new Date(m.joinDate).toLocaleDateString()}</td>
+                  <td className="text-right py-3 space-x-2">
+                    <button onClick={() => toggleRole(m)} className="text-xs text-zinc-500 hover:text-white transition-colors">
+                      {m.role === "admin" ? "Demote" : "Promote"}
+                    </button>
+                    <button onClick={() => removeMember(m)} className="text-xs text-zinc-500 hover:text-red-400 transition-colors">
+                      Remove
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       ) : (
         <p className="text-zinc-600">No members yet. Send an invite to get started.</p>
       )}
