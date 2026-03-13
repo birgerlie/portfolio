@@ -379,6 +379,92 @@ class SiliconDBBeliefBridge:
             logger.warning("Belief history query failed: %s", e)
             return []
 
+    def epistemic_briefing(self, topic: str = "market") -> Optional[Dict]:
+        """Get an epistemic briefing — 'what do I know about the market?'
+
+        Returns structured beliefs: anchors, surprises, conflicts, gaps, time-sensitive.
+        """
+        if not self.connected:
+            return None
+
+        try:
+            briefing = self._client.epistemic_briefing(
+                topic=topic,
+                budget=30,
+                anchor_ratio=0.3,
+                hops=2,
+                neighbor_k=5,
+            )
+            return {
+                "topic": briefing.topic,
+                "rendered": briefing.render(),
+                "anchors": len(briefing.anchors),
+                "surprises": len(briefing.surprises),
+                "conflicts": len(briefing.conflicts),
+                "gaps": len(briefing.gaps),
+                "time_sensitive": len(briefing.time_sensitive),
+                "anchor_beliefs": [
+                    {"subject": b.subject, "predicate": b.predicate, "object": b.object,
+                     "probability": b.probability, "stability": b.stability, "tag": b.tag.value}
+                    for b in briefing.anchors[:10]
+                ],
+                "surprise_beliefs": [
+                    {"subject": b.subject, "predicate": b.predicate, "object": b.object,
+                     "probability": b.probability, "info_value": b.info_value}
+                    for b in briefing.surprises[:10]
+                ],
+                "conflict_pairs": [
+                    {"a": f"{c.belief_a.subject} {c.belief_a.predicate} {c.belief_a.object}",
+                     "b": f"{c.belief_b.subject} {c.belief_b.predicate} {c.belief_b.object}",
+                     "score": c.conflict_score}
+                    for c in briefing.conflicts[:5]
+                ],
+                "knowledge_gaps": [
+                    {"description": g.description, "importance": g.importance}
+                    for g in briefing.gaps[:5]
+                ],
+            }
+        except Exception as e:
+            logger.warning("Epistemic briefing failed: %s", e)
+            return None
+
+    def thermo_state(self) -> Optional[Dict]:
+        """Get the thermodynamic state of the belief system."""
+        if not self.connected:
+            return None
+
+        try:
+            state = self._client.thermo_state()
+            if state:
+                return {
+                    "temperature": state.temperature,
+                    "entropy_production": state.entropy_production,
+                    "criticality": state.criticality,
+                    "criticality_tier": state.criticality_tier,
+                }
+            return None
+        except Exception as e:
+            logger.warning("Thermo state query failed: %s", e)
+            return None
+
+    def node_thermo(self, symbol: str) -> Optional[Dict]:
+        """Get per-stock thermodynamic state."""
+        if not self.connected:
+            return None
+
+        try:
+            state = self._client.node_thermo(f"{symbol}:return")
+            if state:
+                return {
+                    "free_energy": state.free_energy,
+                    "velocity": state.velocity,
+                    "phase_state": state.phase_state,
+                    "predicted_probability": state.predicted_probability,
+                }
+            return None
+        except Exception as e:
+            return None
+
 
 # ── Live Engine ──────────────────────────────────────────────────────────────
 
@@ -420,6 +506,8 @@ class LiveEngine:
         self.anomalies: List[Dict] = []
         self.uncertain_beliefs: List[Dict] = []
         self.percolator_insights: List[Dict] = []
+        self._last_briefing: Optional[Dict] = None
+        self._last_thermo: Optional[Dict] = None
 
     def start(self):
         """Start the engine loop in a background thread."""
@@ -515,6 +603,22 @@ class LiveEngine:
 
         # Snapshot current beliefs
         self.belief_bridge.snapshot(list(all_returns.keys()))
+
+        # Get epistemic briefing — "what do I know?"
+        briefing = self.belief_bridge.epistemic_briefing("market")
+        if briefing:
+            print(f"    Epistemic briefing: {briefing['anchors']} anchors, "
+                  f"{briefing['surprises']} surprises, {briefing['conflicts']} conflicts, "
+                  f"{briefing['gaps']} gaps")
+            self._last_briefing = briefing
+
+        # Get thermodynamic state
+        thermo = self.belief_bridge.thermo_state()
+        if thermo:
+            print(f"    Thermo: temp={thermo['temperature']:.2f}, "
+                  f"entropy={thermo['entropy_production']:.2f}, "
+                  f"criticality={thermo['criticality_tier']}")
+            self._last_thermo = thermo
 
         # 3. Compute market metrics
         avg_returns = [statistics.mean(r) for r in all_returns.values()]
@@ -673,6 +777,10 @@ class LiveEngine:
                     {"type": i["type"], "summary": i.get("summary", ""), "timestamp": i.get("timestamp", "")}
                     for i in self.percolator_insights[:10]
                 ]
+            if self._last_briefing:
+                silicondb_insights["briefing"] = self._last_briefing
+            if self._last_thermo:
+                silicondb_insights["thermo"] = self._last_thermo
 
             try:
                 self.supabase.push_journal({
