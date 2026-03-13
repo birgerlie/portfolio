@@ -81,12 +81,7 @@ export default function AdminPage() {
       fetch("/api/admin/members"),
       fetch("/api/admin/stats"),
     ]);
-    if (!membersRes.ok) {
-      setError(membersRes.status === 401 ? "Not authenticated" : membersRes.status === 403 ? "Not authorized" : "Failed to load");
-      setLoading(false);
-      return;
-    }
-    setMembers(await membersRes.json());
+    if (membersRes.ok) setMembers(await membersRes.json());
     if (statsRes.ok) setStats(await statsRes.json());
     setLoading(false);
   }
