@@ -22,3 +22,6 @@ Thumbs.db
 # Journals (runtime data)
 /journals/
 /tmp/
+
+# Superpowers brainstorming
+.superpowers/
