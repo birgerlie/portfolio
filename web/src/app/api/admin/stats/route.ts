@@ -1,9 +1,12 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { requireAdmin } from "@/lib/admin";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
+  const auth = await requireAdmin();
+  if (auth.error) return NextResponse.json({ error: auth.error }, { status: auth.status });
   const [snapshot, members, txns, weeklyNavs] = await Promise.all([
     prisma.fundSnapshot.findFirst({ orderBy: { date: "desc" } }),
     prisma.member.findMany({ select: { units: true, costBasis: true } }),
