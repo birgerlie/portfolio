@@ -508,6 +508,8 @@ class LiveEngine:
         self.percolator_insights: List[Dict] = []
         self._last_briefing: Optional[Dict] = None
         self._last_thermo: Optional[Dict] = None
+        self._last_narrative: Optional[str] = None
+        self._thermo_shift_reason: str = ""
 
     def start(self):
         """Start the engine loop in a background thread."""
@@ -555,6 +557,43 @@ class LiveEngine:
                 print(f"      [{i['type']}] {i.get('summary', '')}")
         else:
             self.percolator_insights = []
+
+    def _detect_thermo_shift(self, new_thermo: Optional[Dict]) -> bool:
+        """Detect significant thermodynamic state changes between ticks."""
+        if not new_thermo:
+            return False
+
+        old = self._last_thermo
+        self._last_thermo = new_thermo
+
+        if not old:
+            # First reading — always interesting
+            self._thermo_shift_reason = "initial reading"
+            return True
+
+        # Criticality tier changed (e.g., "low" → "high")
+        if old.get("criticality_tier") != new_thermo.get("criticality_tier"):
+            self._thermo_shift_reason = (
+                f"criticality {old.get('criticality_tier')} → {new_thermo.get('criticality_tier')}"
+            )
+            return True
+
+        # Temperature changed significantly (>20% relative)
+        old_temp = old.get("temperature", 0)
+        new_temp = new_thermo.get("temperature", 0)
+        if old_temp > 0 and abs(new_temp - old_temp) / old_temp > 0.2:
+            self._thermo_shift_reason = f"temperature {old_temp:.2f} → {new_temp:.2f}"
+            return True
+
+        # Entropy production spiked (>50% relative)
+        old_entropy = old.get("entropy_production", 0)
+        new_entropy = new_thermo.get("entropy_production", 0)
+        if old_entropy > 0 and abs(new_entropy - old_entropy) / old_entropy > 0.5:
+            self._thermo_shift_reason = f"entropy {old_entropy:.2f} → {new_entropy:.2f}"
+            return True
+
+        self._thermo_shift_reason = ""
+        return False
 
     def _fetch_prices(self):
         """Fetch current prices for all symbols."""
@@ -604,21 +643,50 @@ class LiveEngine:
         # Snapshot current beliefs
         self.belief_bridge.snapshot(list(all_returns.keys()))
 
-        # Get epistemic briefing — "what do I know?"
-        briefing = self.belief_bridge.epistemic_briefing("market")
-        if briefing:
-            print(f"    Epistemic briefing: {briefing['anchors']} anchors, "
-                  f"{briefing['surprises']} surprises, {briefing['conflicts']} conflicts, "
-                  f"{briefing['gaps']} gaps")
-            self._last_briefing = briefing
-
-        # Get thermodynamic state
+        # Get thermodynamic state — always track this for change detection
         thermo = self.belief_bridge.thermo_state()
-        if thermo:
-            print(f"    Thermo: temp={thermo['temperature']:.2f}, "
-                  f"entropy={thermo['entropy_production']:.2f}, "
-                  f"criticality={thermo['criticality_tier']}")
-            self._last_thermo = thermo
+        thermo_changed = self._detect_thermo_shift(thermo)
+
+        # Only generate briefing + synthesis when something interesting happens:
+        # anomalies detected, thermo shift, or percolator fired insights
+        has_anomalies = bool(self.anomalies)
+        has_percolator = bool(self.percolator_insights)
+        should_synthesize = has_anomalies or thermo_changed or has_percolator
+
+        if should_synthesize:
+            reasons = []
+            if has_anomalies:
+                reasons.append(f"{len(self.anomalies)} contradictions")
+            if thermo_changed:
+                reasons.append(f"thermo shift ({self._thermo_shift_reason})")
+            if has_percolator:
+                reasons.append(f"{len(self.percolator_insights)} percolator events")
+            print(f"    ⚡ Generating briefing — triggered by: {', '.join(reasons)}")
+
+            briefing = self.belief_bridge.epistemic_briefing("market")
+            if briefing:
+                print(f"    Briefing: {briefing['anchors']} anchors, "
+                      f"{briefing['surprises']} surprises, {briefing['conflicts']} conflicts, "
+                      f"{briefing['gaps']} gaps")
+                self._last_briefing = briefing
+
+                # Use the synthesizer to generate a narrative from the briefing
+                if self.synthesizer and briefing.get("rendered"):
+                    try:
+                        narrative = self.synthesizer._complete(
+                            "You are a concise quantitative fund analyst. "
+                            "Summarize the key insight from this epistemic briefing in 2-3 sentences. "
+                            "Focus on what changed and what it means for the portfolio.",
+                            briefing["rendered"],
+                            fallback="",
+                        )
+                        if narrative:
+                            self._last_narrative = narrative
+                            print(f"    Narrative: {narrative[:100]}...")
+                    except Exception as e:
+                        logger.warning("Narrative synthesis failed: %s", e)
+        else:
+            print("    No anomalies or thermo shift — skipping briefing")
 
         # 3. Compute market metrics
         avg_returns = [statistics.mean(r) for r in all_returns.values()]
@@ -796,7 +864,7 @@ class LiveEngine:
                         "silicondb": silicondb_insights if silicondb_insights else None,
                         "belief_engine": "silicondb",
                     },
-                    "regime_summary": f"Market regime: {result.regime.value}. Strategy: {result.selected_strategy.name} (confidence {result.selected_strategy.confidence:.0%}). {len(trades)} trade suggestions.",
+                    "regime_summary": self._last_narrative or f"Market regime: {result.regime.value}. Strategy: {result.selected_strategy.name} (confidence {result.selected_strategy.confidence:.0%}). {len(trades)} trade suggestions.",
                     "trades_executed": 0,
                     "nav_change_pct": 0,
                 })
