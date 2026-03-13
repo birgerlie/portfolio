@@ -6,10 +6,10 @@ import { createSupabaseBrowser } from "@/lib/supabase-client";
 type Status = "running" | "degraded" | "stopped" | "unknown";
 
 const statusColors: Record<Status, string> = {
-  running: "bg-green-500",
+  running: "bg-[#3dd68c]",
   degraded: "bg-yellow-500",
-  stopped: "bg-red-500",
-  unknown: "bg-zinc-600",
+  stopped: "bg-[#f76e6e]",
+  unknown: "bg-white/20",
 };
 
 const statusLabels: Record<Status, string> = {
@@ -25,7 +25,6 @@ export function EngineStatus() {
   useEffect(() => {
     const supabase = createSupabaseBrowser();
 
-    // Initial fetch
     supabase
       .from("engine_heartbeat")
       .select("status, updated_at")
@@ -39,7 +38,6 @@ export function EngineStatus() {
         }
       });
 
-    // Realtime subscription
     const channel = supabase
       .channel("engine-heartbeat")
       .on(
@@ -57,9 +55,9 @@ export function EngineStatus() {
   }, []);
 
   return (
-    <div className="flex items-center gap-2 text-xs">
-      <div className={`w-2 h-2 rounded-full ${statusColors[status]}`} />
-      <span className="text-zinc-500">{statusLabels[status]}</span>
+    <div className="flex items-center gap-1.5 text-[12px]">
+      <div className={`w-[6px] h-[6px] rounded-full ${statusColors[status]}`} />
+      <span className="text-white/40">{statusLabels[status]}</span>
     </div>
   );
 }

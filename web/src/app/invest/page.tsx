@@ -29,8 +29,8 @@ function InvestForm() {
   if (step === "success") {
     return (
       <div className="text-center">
-        <h2 className="text-3xl font-light mb-4">Investment Submitted</h2>
-        <p className="text-zinc-400">
+        <h2 className="text-xl font-medium tracking-tight mb-4">Investment Submitted</h2>
+        <p className="text-white/65 text-[13px]">
           Your €{parseFloat(amount).toLocaleString()} investment will be processed at the next monthly subscription window.
         </p>
       </div>
@@ -48,16 +48,16 @@ function InvestForm() {
   return (
     <form onSubmit={handleSubmitAmount} className="space-y-6 max-w-sm mx-auto">
       <div>
-        <label className="text-sm text-zinc-400 block mb-2">Investment Amount (EUR)</label>
+        <label className="text-[11px] uppercase tracking-[0.05em] text-white/40 font-medium block mb-2">Investment Amount (EUR)</label>
         <input type="number" min="100" step="100" value={amount} onChange={(e) => setAmount(e.target.value)}
           placeholder="10,000" required
-          className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-4 py-3 text-white text-2xl font-light text-center focus:outline-none focus:border-zinc-600" />
+          className="w-full bg-white/[0.03] border border-white/[0.06] rounded-lg px-4 py-3 text-[#f5f5f5] text-xl font-medium tracking-tight text-center focus:outline-none focus:border-white/[0.12] transition-colors" />
       </div>
       <button type="submit" disabled={loading}
-        className="w-full bg-white text-black rounded-lg py-3 font-medium hover:bg-zinc-200 transition-colors disabled:opacity-50">
+        className="w-full bg-white text-[#0a0a0a] rounded-lg py-3 text-[13px] font-medium hover:bg-white/90 transition-colors disabled:opacity-50">
         {loading ? "Preparing..." : "Continue to Payment"}
       </button>
-      <p className="text-xs text-zinc-600 text-center">Funds held until next monthly window. Minimum €100.</p>
+      <p className="text-[11px] text-white/30 text-center">Funds held until next monthly window. Minimum €100.</p>
     </form>
   );
 }
@@ -84,7 +84,7 @@ function PaymentForm({ onSuccess }: { onSuccess: () => void }) {
     <form onSubmit={handleSubmit} className="space-y-6 max-w-sm mx-auto">
       <PaymentElement />
       <button type="submit" disabled={loading || !stripe}
-        className="w-full bg-white text-black rounded-lg py-3 font-medium hover:bg-zinc-200 transition-colors disabled:opacity-50">
+        className="w-full bg-white text-[#0a0a0a] rounded-lg py-3 text-[13px] font-medium hover:bg-white/90 transition-colors disabled:opacity-50">
         {loading ? "Processing..." : "Confirm Investment"}
       </button>
     </form>
@@ -93,9 +93,9 @@ function PaymentForm({ onSuccess }: { onSuccess: () => void }) {
 
 export default function InvestPage() {
   return (
-    <div className="min-h-screen pt-28 px-6">
-      <h1 className="text-4xl font-light text-center mb-2">Invest</h1>
-      <p className="text-zinc-500 text-center mb-12">Subscribe to the fund</p>
+    <div className="min-h-screen pt-24 px-6">
+      <h1 className="text-2xl font-medium tracking-tight text-center mb-1">Invest</h1>
+      <p className="text-white/40 text-[13px] text-center mb-12">Subscribe to the fund</p>
       <InvestForm />
     </div>
   );

@@ -17,7 +17,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className="dark">
-      <body className={`${inter.className} bg-black text-white antialiased`}>
+      <body className={`${inter.className} bg-[#0a0a0a] text-[#f5f5f5] antialiased`}>
         <NavBar />
         <main>{children}</main>
       </body>
