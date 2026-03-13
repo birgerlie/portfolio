@@ -76,6 +76,10 @@ export default function AdminPage() {
   const [inviting, setInviting] = useState(false);
   const [inviteMsg, setInviteMsg] = useState("");
 
+  const [liquidateStep, setLiquidateStep] = useState<"idle" | "confirm" | "typing" | "executing" | "done">("idle");
+  const [liquidateConfirm, setLiquidateConfirm] = useState("");
+  const [liquidateResult, setLiquidateResult] = useState("");
+
   async function fetchAll() {
     const [membersRes, statsRes] = await Promise.all([
       fetch("/api/admin/members"),
@@ -125,6 +129,20 @@ export default function AdminPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id: member.id }),
     });
+    fetchAll();
+  }
+
+  async function executeLiquidation() {
+    setLiquidateStep("executing");
+    const res = await fetch("/api/admin/liquidate", { method: "POST" });
+    const data = await res.json();
+    if (res.ok) {
+      setLiquidateResult(`Liquidated ${data.closed} positions. All orders cancelled.`);
+    } else {
+      setLiquidateResult(`Error: ${data.error}`);
+    }
+    setLiquidateStep("done");
+    setLiquidateConfirm("");
     fetchAll();
   }
 
@@ -222,6 +240,82 @@ export default function AdminPage() {
         {inviteMsg && (
           <p className={`mt-3 text-sm ${inviteMsg.startsWith("Error") ? "text-red-400" : "text-green-400"}`}>
             {inviteMsg}
+          </p>
+        )}
+      </div>
+
+      {/* Emergency Liquidation */}
+      <div className="bg-red-950/20 rounded-xl border border-red-900/30 p-6 mb-10">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-medium text-red-400">Emergency Liquidation</h2>
+            <p className="text-sm text-zinc-500 mt-1">Cancel all orders and close all positions at market price</p>
+          </div>
+
+          {liquidateStep === "idle" && (
+            <button
+              onClick={() => setLiquidateStep("confirm")}
+              className="bg-red-600 hover:bg-red-500 text-white px-8 py-3 rounded-lg text-sm font-medium transition-colors"
+            >
+              Sell Everything
+            </button>
+          )}
+
+          {liquidateStep === "confirm" && (
+            <div className="flex items-center gap-3">
+              <span className="text-sm text-red-400">Are you sure?</span>
+              <button
+                onClick={() => setLiquidateStep("typing")}
+                className="bg-red-600 hover:bg-red-500 text-white px-6 py-2 rounded-lg text-sm font-medium transition-colors"
+              >
+                Yes, proceed
+              </button>
+              <button
+                onClick={() => setLiquidateStep("idle")}
+                className="text-sm text-zinc-500 hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+
+          {liquidateStep === "typing" && (
+            <div className="flex items-center gap-3">
+              <div>
+                <p className="text-xs text-red-400 mb-1">Type LIQUIDATE to confirm</p>
+                <input
+                  type="text"
+                  value={liquidateConfirm}
+                  onChange={(e) => setLiquidateConfirm(e.target.value)}
+                  autoFocus
+                  className="bg-zinc-900 border border-red-800 rounded-lg px-4 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-red-500 w-40"
+                  placeholder="LIQUIDATE"
+                />
+              </div>
+              <button
+                onClick={executeLiquidation}
+                disabled={liquidateConfirm !== "LIQUIDATE"}
+                className="bg-red-600 hover:bg-red-500 text-white px-6 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                Confirm
+              </button>
+              <button
+                onClick={() => { setLiquidateStep("idle"); setLiquidateConfirm(""); }}
+                className="text-sm text-zinc-500 hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+
+          {liquidateStep === "executing" && (
+            <p className="text-sm text-yellow-400 animate-pulse">Liquidating all positions...</p>
+          )}
+        </div>
+
+        {liquidateStep === "done" && liquidateResult && (
+          <p className={`mt-4 text-sm ${liquidateResult.startsWith("Error") ? "text-red-400" : "text-green-400"}`}>
+            {liquidateResult}
           </p>
         )}
       </div>
