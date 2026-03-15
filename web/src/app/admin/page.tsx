@@ -89,7 +89,7 @@ function StatusBadge({ status, children }: { status: "green" | "yellow" | "red" 
     neutral: "bg-white/[0.06] text-white/40",
   };
   return (
-    <span className={`text-[11px] px-2 py-0.5 rounded-full ${colors[status]}`}>
+    <span className={`text-[11px] px-2 py-0.5 rounded-lg ${colors[status]}`}>
       {children}
     </span>
   );
@@ -333,7 +333,7 @@ export default function AdminPage() {
                       <td className="py-2.5 px-4 font-medium text-[#f5f5f5]">{m.name}</td>
                       <td className="py-2.5 px-4 text-white/65">{m.email}</td>
                       <td className="py-2.5 px-4">
-                        <span className={`text-[11px] px-2 py-0.5 rounded-full ${m.role === "admin" ? "bg-blue-500/10 text-blue-400" : "bg-white/[0.06] text-white/40"}`}>
+                        <span className={`text-[11px] px-2 py-0.5 rounded-lg ${m.role === "admin" ? "bg-blue-500/10 text-blue-400" : "bg-white/[0.06] text-white/40"}`}>
                           {m.role}
                         </span>
                       </td>

@@ -36,14 +36,17 @@ export async function POST(req: Request) {
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  // Persist the invite
-  await prisma.invite.create({
-    data: {
-      email,
-      name: name || "",
-      status: "pending",
-    },
-  });
+  // Persist the invite (best-effort — email was already sent)
+  try {
+    // Upsert: if a pending invite already exists for this email, update sentAt instead of creating a duplicate
+    await prisma.invite.upsert({
+      where: { email_status: { email, status: "pending" } },
+      update: { sentAt: new Date(), name: name || "" },
+      create: { email, name: name || "", status: "pending" },
+    });
+  } catch (e) {
+    console.error("Failed to persist invite record:", e);
+  }
 
   return NextResponse.json({ ok: true, userId: data.user.id });
 }

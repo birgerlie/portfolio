@@ -175,6 +175,7 @@ model Invite {
   sentAt     DateTime @map("sent_at") @default(now())
   acceptedAt DateTime? @map("accepted_at")
 
+  @@unique([email, status], name: "email_status")
   @@map("invites")
 }
 
