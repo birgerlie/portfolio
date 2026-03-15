@@ -1,6 +1,20 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { requireAdmin } from "@/lib/admin";
+import { prisma } from "@/lib/prisma";
+
+export const dynamic = "force-dynamic";
+
+export async function GET() {
+  const auth = await requireAdmin();
+  if (auth.error) return NextResponse.json({ error: auth.error }, { status: auth.status });
+
+  const invites = await prisma.invite.findMany({
+    orderBy: { sentAt: "desc" },
+  });
+
+  return NextResponse.json(invites);
+}
 
 export async function POST(req: Request) {
   const auth = await requireAdmin();
@@ -21,6 +35,15 @@ export async function POST(req: Request) {
   });
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  // Persist the invite
+  await prisma.invite.create({
+    data: {
+      email,
+      name: name || "",
+      status: "pending",
+    },
+  });
 
   return NextResponse.json({ ok: true, userId: data.user.id });
 }

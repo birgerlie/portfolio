@@ -165,6 +165,19 @@ model Instrument {
   @@map("instruments")
 }
 
+// ── Invites ───────────────────────────────────────────────────────────────
+
+model Invite {
+  id         String   @id @default(cuid())
+  email      String
+  name       String   @default("")
+  status     String   @default("pending") // pending / accepted
+  sentAt     DateTime @map("sent_at") @default(now())
+  acceptedAt DateTime? @map("accepted_at")
+
+  @@map("invites")
+}
+
 // ── Notifications ──────────────────────────────────────────────────────────
 
 model Notification {

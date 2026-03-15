@@ -2,6 +2,15 @@
 
 import { useEffect, useState } from "react";
 
+interface Invite {
+  id: string;
+  email: string;
+  name: string;
+  status: string;
+  sentAt: string;
+  acceptedAt: string | null;
+}
+
 interface Member {
   id: string;
   name: string;
@@ -10,6 +19,13 @@ interface Member {
   units: number;
   costBasis: number;
   joinDate: string;
+  totalInvested: number;
+  totalRedeemed: number;
+  investmentCount: number;
+  redemptionCount: number;
+  pendingRedemptions: number;
+  pendingRedemptionAmount: number;
+  lastActivity: string | null;
   _count: { transactions: number };
 }
 
@@ -65,8 +81,23 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
   );
 }
 
+function StatusBadge({ status, children }: { status: "green" | "yellow" | "red" | "neutral"; children: React.ReactNode }) {
+  const colors = {
+    green: "bg-[#3dd68c]/10 text-[#3dd68c]",
+    yellow: "bg-yellow-400/10 text-yellow-400",
+    red: "bg-[#f76e6e]/10 text-[#f76e6e]",
+    neutral: "bg-white/[0.06] text-white/40",
+  };
+  return (
+    <span className={`text-[11px] px-2 py-0.5 rounded-full ${colors[status]}`}>
+      {children}
+    </span>
+  );
+}
+
 export default function AdminPage() {
   const [members, setMembers] = useState<Member[]>([]);
+  const [invites, setInvites] = useState<Invite[]>([]);
   const [stats, setStats] = useState<FundStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -81,12 +112,14 @@ export default function AdminPage() {
   const [liquidateResult, setLiquidateResult] = useState("");
 
   async function fetchAll() {
-    const [membersRes, statsRes] = await Promise.all([
+    const [membersRes, statsRes, invitesRes] = await Promise.all([
       fetch("/api/admin/members"),
       fetch("/api/admin/stats"),
+      fetch("/api/admin/invite"),
     ]);
     if (membersRes.ok) setMembers(await membersRes.json());
     if (statsRes.ok) setStats(await statsRes.json());
+    if (invitesRes.ok) setInvites(await invitesRes.json());
     setLoading(false);
   }
 
@@ -106,6 +139,7 @@ export default function AdminPage() {
       setInviteMsg(`Magic link sent to ${inviteEmail}`);
       setInviteEmail("");
       setInviteName("");
+      fetchAll();
     } else {
       setInviteMsg(`Error: ${data.error}`);
     }
@@ -151,11 +185,12 @@ export default function AdminPage() {
 
   const unrealizedGain = stats ? stats.fund.nav - stats.capital.totalCostBasis : 0;
   const unrealizedPct = stats && stats.capital.totalCostBasis > 0 ? unrealizedGain / stats.capital.totalCostBasis : 0;
+  const pendingInvites = invites.filter((i) => i.status === "pending");
 
   return (
     <div className="min-h-screen pt-24 px-6 max-w-5xl mx-auto pb-20">
       <h1 className="text-2xl font-medium tracking-tight mb-1">Admin</h1>
-      <p className="text-white/40 text-[13px] mb-10">Fund overview, fees, and member management</p>
+      <p className="text-white/40 text-[13px] mb-10">Fund overview, member management, and controls</p>
 
       {/* Fund Overview */}
       {stats && (
@@ -217,8 +252,8 @@ export default function AdminPage() {
       )}
 
       {/* Invite Section */}
-      <div className="border border-white/[0.06] rounded-lg p-5 mb-10">
-        <h2 className="text-[13px] font-medium text-[#f5f5f5] mb-4">Send Magic Link</h2>
+      <div className="border border-white/[0.06] rounded-lg p-5 mb-6">
+        <h2 className="text-[13px] font-medium text-[#f5f5f5] mb-4">Invite Member</h2>
         <form onSubmit={sendInvite} className="flex flex-col sm:flex-row gap-3">
           <input
             type="email" required placeholder="Email address" value={inviteEmail}
@@ -232,7 +267,7 @@ export default function AdminPage() {
           />
           <button type="submit" disabled={inviting}
             className="bg-white text-[#0a0a0a] px-6 py-2.5 rounded-lg text-[13px] font-medium hover:bg-white/90 transition-colors disabled:opacity-50">
-            {inviting ? "Sending..." : "Send Invite"}
+            {inviting ? "Sending..." : "Send Magic Link"}
           </button>
         </form>
         {inviteMsg && (
@@ -242,8 +277,124 @@ export default function AdminPage() {
         )}
       </div>
 
+      {/* Pending Invites */}
+      {pendingInvites.length > 0 && (
+        <div className="border border-white/[0.06] rounded-lg overflow-hidden mb-10">
+          <div className="px-4 py-3 border-b border-white/[0.06]">
+            <h3 className="text-[11px] uppercase tracking-[0.05em] text-white/40 font-medium">
+              Pending Invites ({pendingInvites.length})
+            </h3>
+          </div>
+          <table className="w-full text-[13px]">
+            <tbody>
+              {pendingInvites.map((inv) => (
+                <tr key={inv.id} className="border-b border-white/[0.03] last:border-b-0">
+                  <td className="py-2.5 px-4 text-white/65">{inv.email}</td>
+                  <td className="py-2.5 px-4 text-white/40">{inv.name || "—"}</td>
+                  <td className="py-2.5 px-4">
+                    <StatusBadge status="yellow">Awaiting signup</StatusBadge>
+                  </td>
+                  <td className="text-right py-2.5 px-4 text-white/30 text-[11px]">
+                    Sent {new Date(inv.sentAt).toLocaleDateString()}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Members Table */}
+      <h2 className="text-[13px] font-medium text-[#f5f5f5] mb-4">Members ({members.length})</h2>
+      {members.length > 0 ? (
+        <div className="border border-white/[0.06] rounded-lg overflow-hidden mb-10">
+          <div className="overflow-x-auto">
+            <table className="w-full text-[13px]">
+              <thead>
+                <tr className="border-b border-white/[0.06]">
+                  <th className="text-left py-2.5 px-4 text-[11px] uppercase tracking-[0.05em] text-white/40 font-medium">Name</th>
+                  <th className="text-left py-2.5 px-4 text-[11px] uppercase tracking-[0.05em] text-white/40 font-medium">Email</th>
+                  <th className="text-left py-2.5 px-4 text-[11px] uppercase tracking-[0.05em] text-white/40 font-medium">Role</th>
+                  <th className="text-left py-2.5 px-4 text-[11px] uppercase tracking-[0.05em] text-white/40 font-medium">Status</th>
+                  <th className="text-right py-2.5 px-4 text-[11px] uppercase tracking-[0.05em] text-white/40 font-medium">Invested</th>
+                  <th className="text-right py-2.5 px-4 text-[11px] uppercase tracking-[0.05em] text-white/40 font-medium">Units</th>
+                  <th className="text-right py-2.5 px-4 text-[11px] uppercase tracking-[0.05em] text-white/40 font-medium">Redemptions</th>
+                  <th className="text-right py-2.5 px-4 text-[11px] uppercase tracking-[0.05em] text-white/40 font-medium">Joined</th>
+                  <th className="text-right py-2.5 px-4"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {members.map((m) => {
+                  const hasInvested = m.totalInvested > 0;
+                  const hasPendingRedeem = m.pendingRedemptions > 0;
+
+                  return (
+                    <tr key={m.id} className="border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors">
+                      <td className="py-2.5 px-4 font-medium text-[#f5f5f5]">{m.name}</td>
+                      <td className="py-2.5 px-4 text-white/65">{m.email}</td>
+                      <td className="py-2.5 px-4">
+                        <span className={`text-[11px] px-2 py-0.5 rounded-full ${m.role === "admin" ? "bg-blue-500/10 text-blue-400" : "bg-white/[0.06] text-white/40"}`}>
+                          {m.role}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-4">
+                        {hasPendingRedeem ? (
+                          <StatusBadge status="red">Sell pending</StatusBadge>
+                        ) : hasInvested ? (
+                          <StatusBadge status="green">Active</StatusBadge>
+                        ) : (
+                          <StatusBadge status="neutral">No investment</StatusBadge>
+                        )}
+                      </td>
+                      <td className="text-right py-2.5 px-4">
+                        {hasInvested ? (
+                          <span className="text-[#f5f5f5]">
+                            {fmt(m.totalInvested)}
+                            <span className="text-white/30 ml-1 text-[11px]">({m.investmentCount}x)</span>
+                          </span>
+                        ) : (
+                          <span className="text-white/30">—</span>
+                        )}
+                      </td>
+                      <td className="text-right py-2.5 px-4 text-white/65">{m.units > 0 ? m.units.toFixed(2) : "—"}</td>
+                      <td className="text-right py-2.5 px-4">
+                        {m.totalRedeemed > 0 || hasPendingRedeem ? (
+                          <span>
+                            {m.totalRedeemed > 0 && (
+                              <span className="text-white/65">{fmt(m.totalRedeemed)}</span>
+                            )}
+                            {hasPendingRedeem && (
+                              <span className="text-[#f76e6e] ml-1 text-[11px]">
+                                +{fmt(m.pendingRedemptionAmount)} pending
+                              </span>
+                            )}
+                          </span>
+                        ) : (
+                          <span className="text-white/30">—</span>
+                        )}
+                      </td>
+                      <td className="text-right py-2.5 px-4 text-white/40">{new Date(m.joinDate).toLocaleDateString()}</td>
+                      <td className="text-right py-2.5 px-4 space-x-2">
+                        <button onClick={() => toggleRole(m)} className="text-[11px] text-white/40 hover:text-white/90 transition-colors">
+                          {m.role === "admin" ? "Demote" : "Promote"}
+                        </button>
+                        <button onClick={() => removeMember(m)} className="text-[11px] text-white/40 hover:text-[#f76e6e] transition-colors">
+                          Remove
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : (
+        <p className="text-white/30 text-[13px] mb-10">No members yet. Send an invite to get started.</p>
+      )}
+
       {/* Emergency Liquidation */}
-      <div className="border border-[#f76e6e]/20 rounded-lg p-5 mb-10 bg-[#f76e6e]/[0.03]">
+      <div className="border border-[#f76e6e]/20 rounded-lg p-5 bg-[#f76e6e]/[0.03]">
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-[13px] font-medium text-[#f76e6e]">Emergency Liquidation</h2>
@@ -317,54 +468,6 @@ export default function AdminPage() {
           </p>
         )}
       </div>
-
-      {/* Members Table */}
-      <h2 className="text-[13px] font-medium text-[#f5f5f5] mb-4">Members ({members.length})</h2>
-      {members.length > 0 ? (
-        <div className="border border-white/[0.06] rounded-lg overflow-hidden">
-          <table className="w-full text-[13px]">
-            <thead>
-              <tr className="border-b border-white/[0.06]">
-                <th className="text-left py-2.5 px-4 text-[11px] uppercase tracking-[0.05em] text-white/40 font-medium">Name</th>
-                <th className="text-left py-2.5 px-4 text-[11px] uppercase tracking-[0.05em] text-white/40 font-medium">Email</th>
-                <th className="text-left py-2.5 px-4 text-[11px] uppercase tracking-[0.05em] text-white/40 font-medium">Role</th>
-                <th className="text-right py-2.5 px-4 text-[11px] uppercase tracking-[0.05em] text-white/40 font-medium">Units</th>
-                <th className="text-right py-2.5 px-4 text-[11px] uppercase tracking-[0.05em] text-white/40 font-medium">Cost Basis</th>
-                <th className="text-right py-2.5 px-4 text-[11px] uppercase tracking-[0.05em] text-white/40 font-medium">Txns</th>
-                <th className="text-right py-2.5 px-4 text-[11px] uppercase tracking-[0.05em] text-white/40 font-medium">Joined</th>
-                <th className="text-right py-2.5 px-4"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {members.map((m) => (
-                <tr key={m.id} className="border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors">
-                  <td className="py-2.5 px-4 font-medium text-[#f5f5f5]">{m.name}</td>
-                  <td className="py-2.5 px-4 text-white/65">{m.email}</td>
-                  <td className="py-2.5 px-4">
-                    <span className={`text-[11px] px-2 py-0.5 rounded-full ${m.role === "admin" ? "bg-blue-500/10 text-blue-400" : "bg-white/[0.06] text-white/40"}`}>
-                      {m.role}
-                    </span>
-                  </td>
-                  <td className="text-right py-2.5 px-4 text-white/65">{m.units.toFixed(2)}</td>
-                  <td className="text-right py-2.5 px-4 text-white/65">{fmt(m.costBasis)}</td>
-                  <td className="text-right py-2.5 px-4 text-white/65">{m._count.transactions}</td>
-                  <td className="text-right py-2.5 px-4 text-white/40">{new Date(m.joinDate).toLocaleDateString()}</td>
-                  <td className="text-right py-2.5 px-4 space-x-2">
-                    <button onClick={() => toggleRole(m)} className="text-[11px] text-white/40 hover:text-white/90 transition-colors">
-                      {m.role === "admin" ? "Demote" : "Promote"}
-                    </button>
-                    <button onClick={() => removeMember(m)} className="text-[11px] text-white/40 hover:text-[#f76e6e] transition-colors">
-                      Remove
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <p className="text-white/30 text-[13px]">No members yet. Send an invite to get started.</p>
-      )}
     </div>
   );
 }
