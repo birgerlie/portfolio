@@ -16,7 +16,7 @@ export async function POST(req: Request) {
   );
 
   const { data, error } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, {
-    redirectTo: `${process.env.NEXT_PUBLIC_SUPABASE_URL ? new URL(req.url).origin : "http://localhost:3000"}/auth/callback`,
+    redirectTo: `${process.env.NEXT_PUBLIC_SITE_URL || new URL(req.url).origin}/auth/callback`,
     data: { name: name || email.split("@")[0] },
   });
 
