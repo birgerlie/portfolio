@@ -30,7 +30,7 @@ export async function POST(req: Request) {
   );
 
   const { data, error } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, {
-    redirectTo: `${process.env.NEXT_PUBLIC_SITE_URL || new URL(req.url).origin}/auth/callback`,
+    redirectTo: `${process.env.NEXT_PUBLIC_SITE_URL || (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : new URL(req.url).origin)}/auth/callback`,
     data: { name: name || email.split("@")[0] },
   });
 
