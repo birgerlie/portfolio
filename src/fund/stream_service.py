@@ -9,6 +9,7 @@ from decimal import Decimal
 from typing import Optional
 
 from alpaca.data.enums import DataFeed
+from alpaca.data.live.crypto import CryptoDataStream
 from alpaca.data.live.stock import StockDataStream
 from alpaca.trading.stream import TradingStream
 
@@ -193,8 +194,9 @@ class AlpacaStreamService:
             self._loop = None
 
     async def _stream_main(self) -> None:
-        """Set up and run both Alpaca streams."""
+        """Set up and run Alpaca stock, crypto, and trading streams."""
         symbols = self.all_stream_symbols
+        crypto_symbols = self._stream_config.all_crypto
 
         self._stock_stream = StockDataStream(
             api_key=self._alpaca_config.api_key,
@@ -213,9 +215,19 @@ class AlpacaStreamService:
 
         self._trading_stream.subscribe_trade_updates(self._handle_fill)
 
-        # Run both streams concurrently
-        await asyncio.gather(
+        # Crypto stream (24/7, separate websocket)
+        streams = [
             self._stock_stream._run_forever(),
             self._trading_stream._run_forever(),
-            return_exceptions=True,
-        )
+        ]
+
+        if crypto_symbols:
+            self._crypto_stream = CryptoDataStream(
+                api_key=self._alpaca_config.api_key,
+                secret_key=self._alpaca_config.secret_key,
+            )
+            self._crypto_stream.subscribe_trades(self._handle_trade, *crypto_symbols)
+            self._crypto_stream.subscribe_quotes(self._handle_quote, *crypto_symbols)
+            streams.append(self._crypto_stream._run_forever())
+
+        await asyncio.gather(*streams, return_exceptions=True)

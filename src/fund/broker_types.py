@@ -19,11 +19,16 @@ class StreamConfig:
     portfolio_symbols: List[str] = field(default_factory=list)
     reference_symbols: List[str] = field(default_factory=list)
     macro_proxies: List[str] = field(default_factory=list)
+    crypto_symbols: List[str] = field(default_factory=list)
     data_feed: str = "iex"
 
     @property
     def all_symbols(self) -> list:
         return sorted(set(self.portfolio_symbols + self.reference_symbols + self.macro_proxies))
+
+    @property
+    def all_crypto(self) -> list:
+        return sorted(set(self.crypto_symbols))
 
 
 @dataclass

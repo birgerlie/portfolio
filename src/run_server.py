@@ -491,10 +491,12 @@ def main():
     portfolio_symbols_env = os.environ.get("PORTFOLIO_SYMBOLS", "")
     reference_symbols_env = os.environ.get("REFERENCE_SYMBOLS", "SPY,QQQ,IWM,DIA")
     macro_proxies_env = os.environ.get("MACRO_PROXIES", "TLT,USO,UUP,UVXY,GLD")
+    crypto_symbols_env = os.environ.get("CRYPTO_SYMBOLS", "BTC/USD,ETH/USD,SOL/USD")
 
     portfolio_syms = [s.strip() for s in portfolio_symbols_env.split(",") if s.strip()] or list(HOLDINGS.keys())
     reference_syms = [s.strip() for s in reference_symbols_env.split(",") if s.strip()]
     macro_syms = [s.strip() for s in macro_proxies_env.split(",") if s.strip()]
+    crypto_syms = [s.strip() for s in crypto_symbols_env.split(",") if s.strip()]
 
     # ── Start embedded SiliconDB (native client with full API) ──
     silicondb_db_path = os.environ.get("SILICONDB_DB_PATH", os.path.expanduser("~/.fund/silicondb"))
@@ -544,10 +546,13 @@ def main():
                 portfolio_symbols=portfolio_syms,
                 reference_symbols=reference_syms,
                 macro_proxies=macro_syms,
+                crypto_symbols=crypto_syms,
                 data_feed=alpaca_data_feed,
             )
             stream_service = AlpacaStreamService(alpaca_cfg, stream_cfg, price_cache, event_queue)
-            print(f"  Stream:          AlpacaStreamService ({len(stream_cfg.all_symbols)} symbols, feed={alpaca_data_feed})")
+            n_stock = len(stream_cfg.all_symbols)
+            n_crypto = len(stream_cfg.all_crypto)
+            print(f"  Stream:          AlpacaStreamService ({n_stock} stocks + {n_crypto} crypto, feed={alpaca_data_feed})")
         except Exception as exc:
             print(f"  Stream:          AlpacaStreamService init failed ({exc}), using null stream")
             stream_service = _NullStreamService(event_queue)
