@@ -83,10 +83,10 @@ class ObservationRecorder:
 
     def _build_observations(self, symbol: str, entry: Any) -> List[Dict[str, Any]]:
         observations = [
-            self._obs(f"{symbol}:price", {"value": entry.price, "symbol": symbol}),
-            self._obs(f"{symbol}:vwap", {"value": entry.vwap, "symbol": symbol}),
-            self._obs(f"{symbol}:trade_intensity", {"value": entry.trade_count, "symbol": symbol}),
-            self._obs(f"{symbol}:spread", {"value": entry.spread, "symbol": symbol}),
+            self._obs(f"{symbol}:price", {"value": float(entry.price), "symbol": symbol}),
+            self._obs(f"{symbol}:vwap", {"value": float(entry.vwap), "symbol": symbol}),
+            self._obs(f"{symbol}:trade_intensity", {"value": int(entry.trade_count), "symbol": symbol}),
+            self._obs(f"{symbol}:spread", {"value": float(entry.spread), "symbol": symbol}),
         ]
 
         # Volume anomaly detection
