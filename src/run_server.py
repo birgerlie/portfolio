@@ -536,8 +536,18 @@ def main():
         live_broker = broker  # _SimBroker
         print(f"  Broker:          SimBroker (no ALPACA_API_KEY set)")
 
+    # ── Load full ticker list from ontology ──────────────────────
+    try:
+        from fund.ontology import fetch_index_compositions
+        sp500, nasdaq100 = fetch_index_compositions()
+        all_tracked = sorted(set(sp500 + nasdaq100))
+        print(f"  Tracked:         {len(all_tracked)} symbols (S&P 500 + NASDAQ 100)")
+    except Exception as exc:
+        all_tracked = []
+        print(f"  Tracked:         failed to load ({exc}), using portfolio only")
+
     # ── Build streaming components ─────────────────────────────
-    event_queue: queue.Queue = queue.Queue(maxsize=1000)
+    event_queue: queue.Queue = queue.Queue(maxsize=10000)
     price_cache = PriceCache()
 
     if alpaca_api_key and alpaca_secret_key:
@@ -547,10 +557,11 @@ def main():
                 reference_symbols=reference_syms,
                 macro_proxies=macro_syms,
                 crypto_symbols=crypto_syms,
+                tracked_symbols=all_tracked,
                 data_feed=alpaca_data_feed,
             )
             stream_service = AlpacaStreamService(alpaca_cfg, stream_cfg, price_cache, event_queue)
-            n_stock = len(stream_cfg.all_symbols)
+            n_stock = len(stream_cfg.all_stream_symbols)
             n_crypto = len(stream_cfg.all_crypto)
             print(f"  Stream:          AlpacaStreamService ({n_stock} stocks + {n_crypto} crypto, feed={alpaca_data_feed})")
         except Exception as exc:
