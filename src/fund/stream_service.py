@@ -1,12 +1,15 @@
 """AlpacaStreamService: manages two Alpaca websocket connections in a background thread."""
 
 import asyncio
+import logging
 import queue
 import threading
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from alpaca.data.enums import DataFeed
 from alpaca.data.live.crypto import CryptoDataStream
@@ -195,7 +198,23 @@ class AlpacaStreamService:
 
     async def _stream_main(self) -> None:
         """Set up and run Alpaca stock, crypto, and trading streams."""
-        symbols = self.all_stream_symbols
+        # Alpaca IEX limits to ~400 symbols. Prioritize: portfolio > reference > macro > tracked
+        MAX_STOCK_SYMBOLS = 200  # Alpaca IEX counts trades+quotes, so 200 symbols = 400 subscriptions
+        all_syms = self.all_stream_symbols
+        if len(all_syms) > MAX_STOCK_SYMBOLS:
+            # Keep priority symbols, fill rest from tracked
+            priority = sorted(set(
+                self._stream_config.portfolio_symbols +
+                self._stream_config.reference_symbols +
+                self._stream_config.macro_proxies
+            ))
+            remaining_slots = MAX_STOCK_SYMBOLS - len(priority)
+            tracked = [s for s in self._stream_config.tracked_symbols if s not in priority]
+            symbols = priority + tracked[:remaining_slots]
+            logger.info("Capped stock symbols to %d (priority=%d, tracked=%d/%d)",
+                        len(symbols), len(priority), min(remaining_slots, len(tracked)), len(tracked))
+        else:
+            symbols = all_syms
         crypto_symbols = self._stream_config.all_crypto
 
         self._stock_stream = StockDataStream(
