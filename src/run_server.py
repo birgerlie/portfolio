@@ -496,13 +496,17 @@ def main():
     reference_syms = [s.strip() for s in reference_symbols_env.split(",") if s.strip()]
     macro_syms = [s.strip() for s in macro_proxies_env.split(",") if s.strip()]
 
-    # ── Build SiliconDB client ─────────────────────────────────
+    # ── Build SiliconDB client (prefer gRPC, fallback to HTTP) ──
+    grpc_target = os.environ.get("SILICONDB_GRPC_TARGET", "localhost:50051")
     try:
-        import requests as _req
-        _req.get(silicondb_url, timeout=2)
         from silicondb import SiliconDBClient  # type: ignore[import]
-        silicondb_client = SiliconDBClient(url=silicondb_url)
-        print(f"  SiliconDB:       connected ({silicondb_url})")
+        silicondb_client = SiliconDBClient(
+            base_url=silicondb_url,
+            grpc_target=grpc_target,
+        )
+        # Verify connection
+        silicondb_client.status()
+        print(f"  SiliconDB:       connected (gRPC={grpc_target}, HTTP={silicondb_url})")
     except Exception:
         silicondb_client = _NullSiliconDB()
         print(f"  SiliconDB:       offline — using null client ({silicondb_url})")
@@ -567,6 +571,20 @@ def main():
         tempo=tempo,
         config=reactor_config,
     )
+
+    # ── Load ontology into SiliconDB ─────────────────────────
+    if not isinstance(silicondb_client, _NullSiliconDB):
+        try:
+            from fund.ontology import build_ontology
+            triples = build_ontology(use_network=False)
+            triple_dicts = [
+                {"subject": t.subject, "predicate": t.predicate, "object_value": t.object, "weight": t.weight}
+                for t in triples
+            ]
+            silicondb_client.insert_triples(triple_dicts)
+            print(f"  Ontology:        loaded {len(triples)} triples into SiliconDB")
+        except Exception as exc:
+            print(f"  Ontology:        failed to load ({exc})")
 
     # ── Start live engine (streaming + heartbeat loop) ─────────
     live = LiveEngine(

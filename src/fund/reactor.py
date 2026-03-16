@@ -53,7 +53,7 @@ class Reactor:
 
         try:
             self._silicondb.add_cooccurrences(
-                ids=[f"{s}:return" for s in self._config.portfolio_symbols],
+                external_ids=[f"{s}:return" for s in self._config.portfolio_symbols],
                 session_id="stream",
             )
         except Exception:
