@@ -55,9 +55,15 @@ class PriceCache:
         symbol: str,
         price: Decimal,
         size: Decimal,
-        timestamp: datetime,
+        timestamp: "datetime | float",
     ) -> None:
-        """Update price, running VWAP, trade count, and total volume for symbol."""
+        """Update price, running VWAP, trade count, and total volume for symbol.
+
+        *timestamp* may be a :class:`datetime` (timezone-aware) or a Unix
+        timestamp float (will be converted to UTC datetime automatically).
+        """
+        if isinstance(timestamp, (int, float)):
+            timestamp = datetime.fromtimestamp(timestamp, tz=timezone.utc)
         with self._lock:
             existing = self._entries.get(symbol)
             if existing is not None:

@@ -14,7 +14,7 @@ class ObservationRecorder:
         price_cache: Object with a ``get(symbol) -> PriceEntry | None`` method.
             PriceEntry must expose: symbol, price, vwap, trade_count, spread,
             and ``is_stale() -> bool``.
-        silicondb_client: SiliconDB client with an ``add_observation(dict)`` method.
+        silicondb_client: SiliconDB client with a ``record_observation_batch(list)`` method.
         batch_interval: Interval hint (seconds) for callers scheduling ``flush()``.
             ObservationRecorder itself does not schedule — callers drive the loop.
     """
@@ -48,21 +48,23 @@ class ObservationRecorder:
         symbols = list(self.pending_symbols)
         self.pending_symbols.clear()
 
+        batch: List[Dict[str, Any]] = []
         for symbol in symbols:
             entry = self._price_cache.get(symbol)
             if entry is None:
                 logger.debug("flush: no cache entry for %s, skipping", symbol)
                 continue
-            if entry.is_stale():
+            if entry.is_stale(max_age_seconds=30):
                 logger.debug("flush: stale entry for %s, skipping", symbol)
                 continue
 
-            observations = self._build_observations(symbol, entry)
-            for obs in observations:
-                try:
-                    self._silicondb.add_observation(obs)
-                except Exception as exc:
-                    logger.warning("SiliconDB error for %s observation %s: %s", symbol, obs.get("external_id"), exc)
+            batch.extend(self._build_observations(symbol, entry))
+
+        if batch:
+            try:
+                self._silicondb.record_observation_batch(batch)
+            except Exception as exc:
+                logger.warning("SiliconDB batch error (%d obs): %s", len(batch), exc)
 
     def set_volume_baseline(self, symbol: str, avg_daily_volume: float) -> None:
         """Set the 20-day average daily volume baseline for *symbol*."""

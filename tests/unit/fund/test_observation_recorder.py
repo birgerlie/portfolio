@@ -83,7 +83,7 @@ def test_flush_calls_silicondb_for_pending_symbols():
     recorder.record_symbol("AAPL")
     recorder.flush()
 
-    silicondb.add_observation.assert_called()
+    silicondb.record_observation_batch.assert_called_once()
 
 
 def test_flush_sends_correct_observation_structure():
@@ -94,12 +94,11 @@ def test_flush_sends_correct_observation_structure():
     recorder.record_symbol("AAPL")
     recorder.flush()
 
-    calls = silicondb.add_observation.call_args_list
-    assert len(calls) > 0
+    batch = silicondb.record_observation_batch.call_args[0][0]
+    assert len(batch) > 0
 
     # Check that observations contain required fields
-    obs_list = [c[0][0] for c in calls]
-    external_ids = {obs["external_id"] for obs in obs_list}
+    external_ids = {obs["external_id"] for obs in batch}
     # Should include price, vwap, trade_intensity, spread observations
     assert any("AAPL:price" in eid for eid in external_ids)
     assert any("AAPL:vwap" in eid for eid in external_ids)
@@ -114,13 +113,14 @@ def test_flush_observation_has_required_keys():
     recorder.record_symbol("MSFT")
     recorder.flush()
 
-    call_args = silicondb.add_observation.call_args_list[0][0][0]
-    assert "external_id" in call_args
-    assert "confirmed" in call_args
-    assert "source" in call_args
-    assert "metadata" in call_args
-    assert call_args["confirmed"] is True
-    assert call_args["source"] == "alpaca_stream"
+    batch = silicondb.record_observation_batch.call_args[0][0]
+    first_obs = batch[0]
+    assert "external_id" in first_obs
+    assert "confirmed" in first_obs
+    assert "source" in first_obs
+    assert "metadata" in first_obs
+    assert first_obs["confirmed"] is True
+    assert first_obs["source"] == "alpaca_stream"
 
 
 def test_flush_clears_pending_symbols():
@@ -141,7 +141,7 @@ def test_flush_skips_stale_symbols():
     recorder.record_symbol("AAPL")
     recorder.flush()
 
-    silicondb.add_observation.assert_not_called()
+    silicondb.record_observation_batch.assert_not_called()
 
 
 def test_flush_skips_symbol_if_cache_returns_none():
@@ -151,14 +151,14 @@ def test_flush_skips_symbol_if_cache_returns_none():
     recorder.record_symbol("AAPL")
     recorder.flush()
 
-    silicondb.add_observation.assert_not_called()
+    silicondb.record_observation_batch.assert_not_called()
 
 
 def test_flush_with_no_pending_symbols():
     recorder, price_cache, silicondb = _make_recorder()
     # Should not raise
     recorder.flush()
-    silicondb.add_observation.assert_not_called()
+    silicondb.record_observation_batch.assert_not_called()
 
 
 def test_flush_multiple_symbols():
@@ -173,8 +173,9 @@ def test_flush_multiple_symbols():
     recorder.record_symbol("MSFT")
     recorder.flush()
 
-    # Should have observations for both symbols
-    all_external_ids = {c[0][0]["external_id"] for c in silicondb.add_observation.call_args_list}
+    # Should have observations for both symbols in a single batch call
+    batch = silicondb.record_observation_batch.call_args[0][0]
+    all_external_ids = {obs["external_id"] for obs in batch}
     assert any("AAPL" in eid for eid in all_external_ids)
     assert any("MSFT" in eid for eid in all_external_ids)
 
@@ -182,7 +183,7 @@ def test_flush_multiple_symbols():
 def test_flush_silicondb_error_is_caught_not_raised():
     recorder, price_cache, silicondb = _make_recorder()
     price_cache.get.return_value = _make_price_entry("AAPL")
-    silicondb.add_observation.side_effect = Exception("connection refused")
+    silicondb.record_observation_batch.side_effect = Exception("connection refused")
 
     recorder.record_symbol("AAPL")
     # Should not raise
@@ -190,27 +191,22 @@ def test_flush_silicondb_error_is_caught_not_raised():
 
 
 def test_flush_partial_silicondb_error_continues():
-    """If one observation fails, the rest should still be attempted."""
+    """Batch is sent as a unit; a batch error is caught and does not raise."""
     recorder, price_cache, silicondb = _make_recorder()
 
     def get_side_effect(symbol):
         return _make_price_entry(symbol)
 
     price_cache.get.side_effect = get_side_effect
-
-    call_count = [0]
-    def side_effect(obs):
-        call_count[0] += 1
-        if call_count[0] == 1:
-            raise Exception("transient error")
-    silicondb.add_observation.side_effect = side_effect
+    silicondb.record_observation_batch.side_effect = Exception("transient error")
 
     recorder.record_symbol("AAPL")
     recorder.record_symbol("MSFT")
+    # Should not raise
     recorder.flush()
 
-    # At minimum 2 calls were attempted (one failed, one succeeded)
-    assert silicondb.add_observation.call_count >= 2
+    # Batch was attempted once
+    assert silicondb.record_observation_batch.call_count == 1
 
 
 # ── set_volume_baseline ───────────────────────────────────────────────────────
@@ -303,7 +299,8 @@ def test_flush_includes_volume_anomaly_observation_when_spike():
     recorder.record_symbol("AAPL")
     recorder.flush()
 
-    all_external_ids = {c[0][0]["external_id"] for c in silicondb.add_observation.call_args_list}
+    batch = silicondb.record_observation_batch.call_args[0][0]
+    all_external_ids = {obs["external_id"] for obs in batch}
     assert "AAPL:volume_anomaly" in all_external_ids
 
 
@@ -316,7 +313,8 @@ def test_flush_no_volume_anomaly_observation_without_spike():
     recorder.record_symbol("AAPL")
     recorder.flush()
 
-    all_external_ids = {c[0][0]["external_id"] for c in silicondb.add_observation.call_args_list}
+    batch = silicondb.record_observation_batch.call_args[0][0]
+    all_external_ids = {obs["external_id"] for obs in batch}
     assert "AAPL:volume_anomaly" not in all_external_ids
 
 
@@ -330,10 +328,8 @@ def test_price_observation_metadata_contains_value():
     recorder.record_symbol("AAPL")
     recorder.flush()
 
-    price_obs = next(
-        c[0][0] for c in silicondb.add_observation.call_args_list
-        if c[0][0]["external_id"] == "AAPL:price"
-    )
+    batch = silicondb.record_observation_batch.call_args[0][0]
+    price_obs = next(obs for obs in batch if obs["external_id"] == "AAPL:price")
     assert price_obs["metadata"]["value"] == 155.25
 
 
@@ -345,8 +341,6 @@ def test_vwap_observation_metadata_contains_value():
     recorder.record_symbol("AAPL")
     recorder.flush()
 
-    vwap_obs = next(
-        c[0][0] for c in silicondb.add_observation.call_args_list
-        if c[0][0]["external_id"] == "AAPL:vwap"
-    )
+    batch = silicondb.record_observation_batch.call_args[0][0]
+    vwap_obs = next(obs for obs in batch if obs["external_id"] == "AAPL:vwap")
     assert vwap_obs["metadata"]["value"] == 149.80
