@@ -373,6 +373,35 @@ class LiveEngine:
             self._current_regime = regime_name
             self._last_analysis = state
 
+            # Signal detection
+            if self._signal_tracker:
+                all_tracked = list(self._stream._price_cache.all_symbols()) if hasattr(self._stream, '_price_cache') else self._symbols
+                new_signals = self._signal_tracker.update(all_tracked)
+                for sig in new_signals:
+                    _log_event("signal", sig.symbol,
+                        f"strength={sig.signal_strength:.2f} entropy={sig.entropy:.2f} "
+                        f"thermo={sig.node_temperature:.2f}")
+
+                decayed = self._signal_tracker.get_decayed()
+                for sym in decayed:
+                    _log_event("decay", sym, "signal decayed")
+
+                # Sync top signals to Supabase
+                top_signals = self._signal_tracker.get_signals()[:20]
+                if top_signals:
+                    try:
+                        self._supabase.push_signals([{
+                            "symbol": s.symbol,
+                            "signal_strength": s.signal_strength,
+                            "entropy": s.entropy,
+                            "node_temperature": s.node_temperature,
+                            "belief_type": s.belief_type,
+                            "conviction": s.conviction,
+                            "status": s.status,
+                        } for s in top_signals])
+                    except Exception:
+                        pass
+
         except Exception as e:
             logger.error("Analysis cycle error: %s", e)
 

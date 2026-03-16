@@ -615,6 +615,14 @@ def main():
         controller = None
         print(f"  Controller:      unavailable ({exc})")
 
+    # ── Build signal tracker ───────────────────────────────────
+    from fund.signal_tracker import SignalTracker
+    signal_tracker = SignalTracker(
+        silicondb_client=silicondb_client,
+        portfolio_symbols=portfolio_syms,
+    )
+    print(f"  Signals:         SignalTracker (watching {len(all_tracked)} symbols)")
+
     # ── Start live engine (streaming + heartbeat loop) ─────────
     live = LiveEngine(
         symbols=portfolio_syms,
@@ -629,6 +637,7 @@ def main():
         controller=controller,
         broker=live_broker,
         interval_seconds=heartbeat_interval,
+        signal_tracker=signal_tracker,
     )
     live.start()
 
