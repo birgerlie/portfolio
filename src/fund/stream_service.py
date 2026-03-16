@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Optional
 
+from alpaca.data.enums import DataFeed
 from alpaca.data.live.stock import StockDataStream
 from alpaca.trading.stream import TradingStream
 
@@ -198,7 +199,7 @@ class AlpacaStreamService:
         self._stock_stream = StockDataStream(
             api_key=self._alpaca_config.api_key,
             secret_key=self._alpaca_config.secret_key,
-            feed=self._stream_config.data_feed,
+            feed=DataFeed(self._stream_config.data_feed),
         )
         self._trading_stream = TradingStream(
             api_key=self._alpaca_config.api_key,
@@ -214,7 +215,7 @@ class AlpacaStreamService:
 
         # Run both streams concurrently
         await asyncio.gather(
-            self._stock_stream._run(),
-            self._trading_stream._run(),
+            self._stock_stream._run_forever(),
+            self._trading_stream._run_forever(),
             return_exceptions=True,
         )
