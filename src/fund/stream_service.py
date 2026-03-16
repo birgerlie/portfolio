@@ -199,7 +199,7 @@ class AlpacaStreamService:
     async def _stream_main(self) -> None:
         """Set up and run Alpaca stock, crypto, and trading streams."""
         # Alpaca IEX limits to ~400 symbols. Prioritize: portfolio > reference > macro > tracked
-        MAX_STOCK_SYMBOLS = 200  # Alpaca IEX counts trades+quotes, so 200 symbols = 400 subscriptions
+        MAX_STOCK_SYMBOLS = 200  # Alpaca IEX limit ~405 total subscriptions
         all_syms = self.all_stream_symbols
         if len(all_syms) > MAX_STOCK_SYMBOLS:
             # Keep priority symbols, fill rest from tracked
@@ -229,8 +229,17 @@ class AlpacaStreamService:
         )
 
         if symbols:
+            # Subscribe trades for all symbols, quotes only for priority (portfolio+reference+macro)
+            # This halves the subscription count for tracked symbols
             self._stock_stream.subscribe_trades(self._handle_trade, *symbols)
-            self._stock_stream.subscribe_quotes(self._handle_quote, *symbols)
+            priority = sorted(set(
+                self._stream_config.portfolio_symbols +
+                self._stream_config.reference_symbols +
+                self._stream_config.macro_proxies
+            ))
+            if priority:
+                self._stock_stream.subscribe_quotes(self._handle_quote, *priority)
+            logger.info("Subscribed: %d trade streams, %d quote streams", len(symbols), len(priority))
 
         self._trading_stream.subscribe_trade_updates(self._handle_fill)
 
