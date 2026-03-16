@@ -70,7 +70,7 @@ class AlpacaStreamService:
     @property
     def all_stream_symbols(self) -> list[str]:
         with self._lock:
-            base = list(self._stream_config.all_symbols)
+            base = list(self._stream_config.all_stream_symbols)
             extra = list(self._extra_symbols)
         combined = sorted(set(base + extra))
         return combined
