@@ -3,9 +3,31 @@
 import logging
 import queue
 import threading
+from datetime import datetime, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# ANSI colors for console event log
+_C = {
+    "trade": "\033[36m",     # cyan
+    "quote": "\033[34m",     # blue
+    "fill": "\033[32m",      # green
+    "anomaly": "\033[33m",   # yellow
+    "thermo": "\033[35m",    # magenta
+    "regime": "\033[91m",    # bright red
+    "reset": "\033[0m",
+}
+
+
+def _log_event(kind: str, symbol: str, detail: str = "") -> None:
+    """Print a colored event line to console."""
+    ts = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+    color = _C.get(kind, "")
+    reset = _C["reset"]
+    tag = kind.upper().ljust(7)
+    sym = symbol.ljust(6) if symbol else "      "
+    print(f"{color}[{ts}] {tag} {sym} {detail}{reset}")
 
 
 class LiveEngine:
@@ -24,6 +46,7 @@ class LiveEngine:
         tempo,                   # Tempo
         silicondb_client,
         interval_seconds: int = 300,
+        verbose: bool = True,
     ):
         self._symbols = symbols
         self._fund = fund
@@ -35,8 +58,10 @@ class LiveEngine:
         self._tempo = tempo
         self._silicondb = silicondb_client
         self._interval = interval_seconds
+        self._verbose = verbose
         self._stop_event = threading.Event()
         self._event_queue = stream_service._event_queue
+        self._event_count = 0
 
     def start(self):
         self._stream.start()
@@ -65,15 +90,33 @@ class LiveEngine:
                 self._recorder.flush()
                 continue
 
+            self._event_count += 1
+
             if event.kind == "trade":
                 self._recorder.record_symbol(event.symbol)
+                if self._verbose:
+                    price = event.data.get("price", "")
+                    size = event.data.get("size", "")
+                    _log_event("trade", event.symbol, f"${price} x{size}")
+            elif event.kind == "quote":
+                if self._verbose:
+                    bid = event.data.get("bid", "")
+                    ask = event.data.get("ask", "")
+                    _log_event("quote", event.symbol, f"bid=${bid} ask=${ask}")
             elif event.kind == "fill":
                 self._handle_fill(event)
+                if self._verbose:
+                    side = event.data.get("side", "")
+                    qty = event.data.get("filled_qty", "")
+                    price = event.data.get("filled_avg_price", "")
+                    _log_event("fill", event.data.get("symbol", ""), f"{side} {qty} @ ${price}")
 
             self._recorder.flush()
 
             for symbol in self._recorder.get_anomalies():
                 self._reactor.on_volume_anomaly({"symbol": symbol})
+                if self._verbose:
+                    _log_event("anomaly", symbol, "volume 2x+ baseline")
 
     def _handle_fill(self, event):
         try:

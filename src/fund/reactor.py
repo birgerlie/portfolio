@@ -83,10 +83,14 @@ class Reactor:
             prev_tier = self._tempo.current_tier
             changed = self._tempo.update_temperature(event["temperature"])
             if changed:
+                temp = event["temperature"]
+                cooldown = self._tempo.get_cooldown_ms()
                 logger.info(
-                    "on_thermo_shift: tier changed %s -> %s",
+                    "on_thermo_shift: tier changed %s -> %s (temp=%.3f, cooldown=%s)",
                     prev_tier,
                     self._tempo.current_tier,
+                    temp,
+                    f"{cooldown}ms" if cooldown else "off",
                 )
         except Exception:
             logger.exception("on_thermo_shift: failed to update temperature")
