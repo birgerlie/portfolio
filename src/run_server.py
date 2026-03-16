@@ -7,6 +7,7 @@ Usage:
 """
 
 import os
+import queue
 import sys
 import statistics
 from datetime import date, datetime, timedelta
@@ -18,7 +19,6 @@ from uuid import uuid4
 sys.path.insert(0, str(Path(__file__).parent))
 
 from fund.types import Fund, Instrument, WeeklyNAV
-from fund.mock_broker import MockBroker
 from fund.universe import InvestmentUniverse
 from fund.journal import EventJournal
 from fund.thermo_metrics import ThermoMetrics
@@ -28,6 +28,120 @@ from fund.supabase_sync import SupabaseSync, SupabaseConfig
 from fund.grpc_runner import run_server
 from fund.grpc_server import FundServiceServicer
 from fund.live_engine import LiveEngine
+from fund.broker_types import AlpacaConfig, StreamConfig, BrokerAccount, BrokerPosition, BrokerOrder
+from fund.price_cache import PriceCache
+from fund.stream_service import AlpacaStreamService
+from fund.observation_recorder import ObservationRecorder
+from fund.tempo import Tempo
+from fund.reactor import Reactor, ReactorConfig
+
+
+# ── Lightweight simulation broker (no API keys required) ─────────────────────
+
+class _SimBroker:
+    """In-memory broker for the run_server simulation script.
+
+    Replaced MockBroker after that class was deleted. Provides only the subset
+    of the AlpacaBroker interface used by sync_to_supabase and the main loop:
+    get_account(), get_positions(), seed_position(), seed_price().
+    """
+
+    def __init__(self, cash: Decimal = Decimal("100000")) -> None:
+        self._cash = cash
+        self._positions: dict = {}  # symbol -> (qty, avg_entry_price)
+        self._prices: dict = {}     # symbol -> Decimal
+
+    def seed_price(self, symbol: str, price: Decimal) -> None:
+        self._prices[symbol] = price
+
+    def seed_position(self, symbol: str, qty: Decimal, avg_price: Decimal) -> None:
+        self._positions[symbol] = (qty, avg_price)
+        if symbol not in self._prices:
+            self._prices[symbol] = avg_price
+
+    def get_account(self) -> BrokerAccount:
+        equity = self._cash + sum(
+            qty * self._prices.get(sym, avg)
+            for sym, (qty, avg) in self._positions.items()
+        )
+        return BrokerAccount(
+            cash=self._cash,
+            equity=equity,
+            buying_power=self._cash,
+            status="ACTIVE",
+        )
+
+    def get_positions(self) -> list:
+        result = []
+        for sym, (qty, avg) in self._positions.items():
+            if qty <= 0:
+                continue
+            price = self._prices.get(sym, avg)
+            mv = qty * price
+            cost = qty * avg
+            upl = mv - cost
+            upl_pct = float(upl / cost) if cost else 0.0
+            result.append(BrokerPosition(
+                symbol=sym,
+                quantity=qty,
+                market_value=mv,
+                avg_entry_price=avg,
+                current_price=price,
+                unrealized_pl=upl,
+                unrealized_pl_pct=upl_pct,
+            ))
+        return result
+
+
+# ── Null SiliconDB client (no-op for dev/test without SiliconDB running) ─────
+
+class _NullSiliconDB:
+    """Drop-in SiliconDB client that silently discards all calls.
+
+    Used when SILICONDB_URL is not reachable or in development mode.
+    """
+
+    def add_observation(self, obs: dict) -> None:
+        pass
+
+    def record_observation_batch(self, observations: list) -> None:
+        pass
+
+    def propagate(self, **kwargs) -> None:
+        pass
+
+    def add_cooccurrences(self, **kwargs) -> None:
+        pass
+
+    def epistemic_briefing(self, **kwargs) -> None:
+        pass
+
+    def insert_triples(self, **kwargs) -> None:
+        pass
+
+
+# ── Null stream service (no-op when no Alpaca credentials are set) ────────────
+
+class _NullStreamService:
+    """Drop-in AlpacaStreamService for use when ALPACA_API_KEY is not set.
+
+    Provides the minimal interface consumed by LiveEngine:
+    is_running, dropped_events, _event_queue, start(), stop().
+    """
+
+    def __init__(self, event_queue: queue.Queue) -> None:
+        self._event_queue = event_queue
+        self.dropped_events: int = 0
+
+    @property
+    def is_running(self) -> bool:
+        return False
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
 
 
 # ── Portfolio definition ──────────────────────────────────────────────────────
@@ -171,7 +285,7 @@ def fetch_spy_weekly(weeks: int = 52) -> dict:
     return spy_returns
 
 
-def sync_to_supabase(supabase: SupabaseSync, fund: Fund, broker: MockBroker,
+def sync_to_supabase(supabase: SupabaseSync, fund: Fund, broker: _SimBroker,
                      universe: InvestmentUniverse, nav_history: list,
                      health: HealthMonitor):
     """Push all fund state to Supabase for the web dashboard."""
@@ -305,7 +419,7 @@ def main():
     first_nav = nav_history[0]
     latest_nav = nav_history[-1]
 
-    broker = MockBroker(cash=STARTING_CASH)
+    broker = _SimBroker(cash=STARTING_CASH)
     for symbol, qty in HOLDINGS.items():
         current = latest_prices.get(symbol, 100)
         # Entry price = current price adjusted by portfolio return
