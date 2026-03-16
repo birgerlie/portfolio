@@ -4,6 +4,9 @@
 Usage:
     python run_server.py                          # uses .env or env vars
     SUPABASE_URL=... SUPABASE_KEY=... python run_server.py
+
+Requires SiliconDB running with beliefs and theme discovery enabled:
+    python -m silicondb.server /path/to/db --enable-beliefs --enable-theme-discovery --port 8642
 """
 
 import os
