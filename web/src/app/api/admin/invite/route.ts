@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { requireAdmin } from "@/lib/admin";
 import { prisma } from "@/lib/prisma";
+import { getAuthCallbackUrl } from "@/lib/urls";
 
 export const dynamic = "force-dynamic";
 
@@ -30,7 +31,7 @@ export async function POST(req: Request) {
   );
 
   const { data, error } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, {
-    redirectTo: `${process.env.NEXT_PUBLIC_SITE_URL || (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : new URL(req.url).origin)}/auth/callback`,
+    redirectTo: getAuthCallbackUrl(new URL(req.url).origin),
     data: { name: name || email.split("@")[0] },
   });
 

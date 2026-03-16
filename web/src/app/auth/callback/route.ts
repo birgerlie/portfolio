@@ -1,12 +1,13 @@
 import { createSupabaseServer } from "@/lib/supabase-server";
 import { prisma } from "@/lib/prisma";
+import { getSiteUrl } from "@/lib/urls";
 import { NextResponse } from "next/server";
 
 export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url);
   const code = searchParams.get("code");
 
-  const redirectUrl = process.env.NEXT_PUBLIC_SITE_URL || (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : origin);
+  const redirectUrl = getSiteUrl(origin);
 
   if (code) {
     const supabase = await createSupabaseServer();
