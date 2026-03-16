@@ -2,8 +2,10 @@
 
 import logging
 import queue
+import statistics
 import threading
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -47,6 +49,8 @@ class LiveEngine:
         reactor,                 # Reactor
         tempo,                   # Tempo
         silicondb_client,
+        controller=None,         # AutonomousController
+        broker=None,             # AlpacaBroker
         interval_seconds: int = 300,
         verbose: bool = True,
     ):
@@ -59,11 +63,15 @@ class LiveEngine:
         self._reactor = reactor
         self._tempo = tempo
         self._silicondb = silicondb_client
+        self._controller = controller
+        self._broker = broker
         self._interval = interval_seconds
         self._verbose = verbose
         self._stop_event = threading.Event()
         self._event_queue = stream_service._event_queue
         self._event_count = 0
+        self._current_regime = None
+        self._last_analysis = None
 
     def start(self):
         # Register percolator rules if native SiliconDB client
@@ -242,8 +250,115 @@ class LiveEngine:
                     except Exception:
                         pass
 
+                # ── Run autonomous analysis + trade execution ──
+                self._run_analysis_cycle()
+
             except Exception as e:
                 logger.error("Percolator loop error: %s", e)
+
+    def _run_analysis_cycle(self):
+        """Run regime detection → portfolio composition → trade execution."""
+        if not self._controller or not self._broker:
+            return
+
+        try:
+            # Build market metrics from PriceCache
+            prices = {}
+            returns = []
+            for sym in self._symbols:
+                entry = self._stream._price_cache.get(sym) if hasattr(self._stream, '_price_cache') else None
+                if entry and entry.price > 0:
+                    prices[sym] = float(entry.price)
+                    if entry.price_return is not None:
+                        returns.append(entry.price_return)
+
+            if not prices or len(prices) < 2:
+                return  # Not enough data yet
+
+            avg_ret = statistics.mean(returns) if returns else 0.0
+            vol = statistics.stdev(returns) if len(returns) > 1 else 0.0
+            pos_pct = len([r for r in returns if r > 0]) / max(len(returns), 1)
+
+            market_metrics = {
+                "avg_return": avg_ret,
+                "volatility": vol,
+                "positive_pct": pos_pct,
+                "momentum": avg_ret,  # simplified
+            }
+
+            # Build beliefs from price data
+            beliefs_dict = {}
+            for sym in self._symbols:
+                entry = self._stream._price_cache.get(sym) if hasattr(self._stream, '_price_cache') else None
+                if entry and entry.price_return is not None:
+                    ret = entry.price_return
+                    if ret > 0.002:
+                        beliefs_dict[sym] = ("high_growth", min(0.9, 0.5 + ret * 50))
+                    elif ret < -0.002:
+                        beliefs_dict[sym] = ("declining", min(0.9, 0.5 + abs(ret) * 50))
+                    else:
+                        beliefs_dict[sym] = ("stable", 0.6)
+
+            if not beliefs_dict:
+                return
+
+            # Get current portfolio weights (from broker positions)
+            current_portfolio = {}
+            try:
+                positions = self._broker.get_positions()
+                account = self._broker.get_account()
+                total_value = float(account.equity) if account.equity > 0 else float(account.cash)
+                for pos in positions:
+                    current_portfolio[pos.symbol] = float(pos.market_value) / total_value if total_value > 0 else 0
+            except Exception:
+                pass
+
+            # Run the controller
+            state = self._controller.analyze(
+                market_metrics=market_metrics,
+                beliefs_dict=beliefs_dict,
+                current_portfolio=current_portfolio,
+                current_prices=prices,
+            )
+
+            regime_name = state.regime.name if hasattr(state.regime, 'name') else str(state.regime)
+            strategy_name = state.selected_strategy.name if hasattr(state.selected_strategy, 'name') else str(state.selected_strategy)
+
+            if self._verbose:
+                _log_event("regime", "", f"{regime_name} | strategy={strategy_name} | confidence={state.confidence:.2f}")
+
+            # Check for regime change
+            if self._current_regime and regime_name != self._current_regime:
+                _log_event("regime", "", f"REGIME CHANGE: {self._current_regime} → {regime_name}")
+
+                # Execute trades from the execution plan
+                if state.execution_plan and state.execution_plan.trades:
+                    for trade in state.execution_plan.trades:
+                        try:
+                            symbol = trade.symbol
+                            side = "buy" if trade.type == "BUY" else "sell"
+                            # Calculate qty from allocation and portfolio value
+                            price = prices.get(symbol, 0)
+                            if price > 0 and total_value > 0:
+                                target_value = total_value * abs(trade.allocation)
+                                qty = Decimal(str(int(target_value / price)))
+                                if qty > 0:
+                                    order = self._broker.submit_market_order(symbol=symbol, qty=qty, side=side)
+                                    _log_event("fill", symbol, f"{side.upper()} {qty} @ ~${price:.2f} ({trade.reason})")
+                        except Exception as exc:
+                            logger.error("Trade execution failed for %s: %s", trade.symbol, exc)
+
+                    # Sync to Supabase after trades
+                    try:
+                        self._supabase.push_heartbeat(self._build_heartbeat())
+                    except Exception:
+                        pass
+
+            self._current_regime = regime_name
+            self._last_analysis = state
+
+        except Exception as e:
+            logger.error("Analysis cycle error: %s", e)
 
     # ── heartbeat ─────────────────────────────────────────────────────────────
 
@@ -259,7 +374,7 @@ class LiveEngine:
             "status": "running",
             "alpaca_connected": self._stream.is_running,
             "active_positions": len(self._symbols),
-            "current_regime": "unknown",
+            "current_regime": self._current_regime or "unknown",
             "next_action": "streaming",
             "dropped_events": self._stream.dropped_events,
         }

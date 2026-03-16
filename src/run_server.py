@@ -595,6 +595,15 @@ def main():
         except Exception as exc:
             print(f"  Ontology:        failed to load ({exc})")
 
+    # ── Build autonomous controller ──────────────────────────
+    try:
+        from trading_backtest.automation_controller import AutonomousController
+        controller = AutonomousController()
+        print(f"  Controller:      AutonomousController (regime → strategy → portfolio → trades)")
+    except Exception as exc:
+        controller = None
+        print(f"  Controller:      unavailable ({exc})")
+
     # ── Start live engine (streaming + heartbeat loop) ─────────
     live = LiveEngine(
         symbols=portfolio_syms,
@@ -606,6 +615,8 @@ def main():
         reactor=reactor,
         tempo=tempo,
         silicondb_client=silicondb_client,
+        controller=controller,
+        broker=live_broker,
         interval_seconds=heartbeat_interval,
     )
     live.start()
