@@ -195,6 +195,8 @@ class LiveEngine:
                 break
 
             try:
+                should_analyze = False
+
                 # Check thermo state
                 if hasattr(self._silicondb, 'thermo_state'):
                     thermo = self._silicondb.thermo_state()
@@ -210,6 +212,7 @@ class LiveEngine:
 
                         if changed:
                             self._reactor.on_thermo_shift({"temperature": temp})
+                            should_analyze = True  # Thermo shift → re-evaluate
 
                 # Check for contradictions
                 if hasattr(self._silicondb, 'detect_contradictions'):
@@ -220,9 +223,10 @@ class LiveEngine:
                             _log_event("belief", "", f"{n} contradictions detected")
                         if n > 0 and self._tempo.should_analyze():
                             self._reactor.on_significant_shift({"contradictions": n})
+                            should_analyze = True  # Contradictions → re-evaluate
 
-                # Request epistemic briefing if warm+
-                if self._tempo.should_analyze() and hasattr(self._silicondb, 'epistemic_briefing'):
+                # Request epistemic briefing if warm+ and something triggered analysis
+                if should_analyze and hasattr(self._silicondb, 'epistemic_briefing'):
                     briefing = self._silicondb.epistemic_briefing(
                         topic="market", budget=20, anchor_ratio=0.3, hops=2, neighbor_k=5,
                     )
@@ -243,15 +247,18 @@ class LiveEngine:
                 if hasattr(self._silicondb, 'event_sequence'):
                     try:
                         events = self._silicondb.replay_events(since_sequence=0, limit=50)
-                        if events and len(events) > 0 and self._verbose:
-                            for evt in events[-5:]:  # show last 5
-                                evt_type = evt.get("event_type", "?") if isinstance(evt, dict) else str(evt)
-                                _log_event("belief", "", f"percolator: {evt_type}")
+                        if events and len(events) > 0:
+                            if self._verbose:
+                                for evt in events[-5:]:
+                                    evt_type = evt.get("event_type", "?") if isinstance(evt, dict) else str(evt)
+                                    _log_event("belief", "", f"percolator: {evt_type}")
+                            should_analyze = True  # Percolator fired → re-evaluate
                     except Exception:
                         pass
 
-                # ── Run autonomous analysis + trade execution ──
-                self._run_analysis_cycle()
+                # ── Only run analysis when percolator events triggered it ──
+                if should_analyze:
+                    self._run_analysis_cycle()
 
             except Exception as e:
                 logger.error("Percolator loop error: %s", e)
