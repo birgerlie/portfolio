@@ -474,15 +474,109 @@ def main():
     else:
         print("\n  Supabase sync skipped (no SUPABASE_SERVICE_ROLE_KEY set)")
 
-    # ── Start live engine (continuous analysis loop) ──────────
+    # ── Read streaming configuration from environment ─────────
+    broker_mode = os.environ.get("BROKER_MODE", "paper")
+    alpaca_api_key = os.environ.get("ALPACA_API_KEY", "")
+    alpaca_secret_key = os.environ.get("ALPACA_SECRET_KEY", "")
+    alpaca_data_feed = os.environ.get("ALPACA_DATA_FEED", "iex")
     silicondb_url = os.environ.get("SILICONDB_URL", "http://127.0.0.1:8642")
+    heartbeat_interval = int(os.environ.get("HEARTBEAT_INTERVAL", "300"))
+    thermo_cold = float(os.environ.get("THERMO_COLD", "0.3"))
+    thermo_warm = float(os.environ.get("THERMO_WARM", "0.6"))
+    thermo_hot = float(os.environ.get("THERMO_HOT", "0.8"))
+
+    portfolio_symbols_env = os.environ.get("PORTFOLIO_SYMBOLS", "")
+    reference_symbols_env = os.environ.get("REFERENCE_SYMBOLS", "SPY,QQQ,IWM,DIA")
+    macro_proxies_env = os.environ.get("MACRO_PROXIES", "TLT,USO,UUP,UVXY,GLD")
+
+    portfolio_syms = [s.strip() for s in portfolio_symbols_env.split(",") if s.strip()] or list(HOLDINGS.keys())
+    reference_syms = [s.strip() for s in reference_symbols_env.split(",") if s.strip()]
+    macro_syms = [s.strip() for s in macro_proxies_env.split(",") if s.strip()]
+
+    # ── Build SiliconDB client ─────────────────────────────────
+    try:
+        import requests as _req
+        _req.get(silicondb_url, timeout=2)
+        from silicondb import SiliconDBClient  # type: ignore[import]
+        silicondb_client = SiliconDBClient(url=silicondb_url)
+        print(f"  SiliconDB:       connected ({silicondb_url})")
+    except Exception:
+        silicondb_client = _NullSiliconDB()
+        print(f"  SiliconDB:       offline — using null client ({silicondb_url})")
+
+    # ── Build broker ───────────────────────────────────────────
+    live_broker = None
+    if alpaca_api_key and alpaca_secret_key:
+        try:
+            from fund.alpaca_broker import AlpacaBroker
+            alpaca_cfg = AlpacaConfig(
+                api_key=alpaca_api_key,
+                secret_key=alpaca_secret_key,
+                paper=(broker_mode != "live"),
+            )
+            live_broker = AlpacaBroker(alpaca_cfg)
+            print(f"  Broker:          AlpacaBroker ({broker_mode} mode)")
+        except Exception as exc:
+            print(f"  Broker:          AlpacaBroker failed ({exc}), falling back to sim broker")
+            live_broker = broker  # _SimBroker already built above
+    else:
+        live_broker = broker  # _SimBroker
+        print(f"  Broker:          SimBroker (no ALPACA_API_KEY set)")
+
+    # ── Build streaming components ─────────────────────────────
+    event_queue: queue.Queue = queue.Queue(maxsize=1000)
+    price_cache = PriceCache()
+
+    if alpaca_api_key and alpaca_secret_key:
+        try:
+            stream_cfg = StreamConfig(
+                portfolio_symbols=portfolio_syms,
+                reference_symbols=reference_syms,
+                macro_proxies=macro_syms,
+                data_feed=alpaca_data_feed,
+            )
+            stream_service = AlpacaStreamService(alpaca_cfg, stream_cfg, price_cache, event_queue)
+            print(f"  Stream:          AlpacaStreamService ({len(stream_cfg.all_symbols)} symbols, feed={alpaca_data_feed})")
+        except Exception as exc:
+            print(f"  Stream:          AlpacaStreamService init failed ({exc}), using null stream")
+            stream_service = _NullStreamService(event_queue)
+    else:
+        stream_service = _NullStreamService(event_queue)
+        print(f"  Stream:          NullStreamService (no ALPACA_API_KEY set)")
+
+    # ── Build observation, tempo, reactor ─────────────────────
+    observation_recorder = ObservationRecorder(price_cache, silicondb_client)
+    tempo = Tempo(
+        silicondb_client=silicondb_client,
+        cold_threshold=thermo_cold,
+        warm_threshold=thermo_warm,
+        hot_threshold=thermo_hot,
+    )
+    reactor_config = ReactorConfig(
+        portfolio_symbols=portfolio_syms,
+        reference_symbols=reference_syms,
+    )
+    reactor = Reactor(
+        silicondb_client=silicondb_client,
+        broker=live_broker,
+        supabase_sync=supabase,
+        price_cache=price_cache,
+        tempo=tempo,
+        config=reactor_config,
+    )
+
+    # ── Start live engine (streaming + heartbeat loop) ─────────
     live = LiveEngine(
-        symbols=PORTFOLIO_SYMBOLS,
+        symbols=portfolio_syms,
         fund=fund,
         supabase=supabase,
         synthesizer=synthesizer,
-        interval_seconds=300,  # every 5 minutes
-        silicondb_url=silicondb_url,
+        stream_service=stream_service,
+        observation_recorder=observation_recorder,
+        reactor=reactor,
+        tempo=tempo,
+        silicondb_client=silicondb_client,
+        interval_seconds=heartbeat_interval,
     )
     live.start()
 
@@ -498,10 +592,10 @@ def main():
         def create_heartbeat(self):
             positions = self._broker.get_positions()
             return self._monitor.create_heartbeat(
-                alpaca_connected=False,
+                alpaca_connected=getattr(live, "_stream", None) is not None and getattr(live._stream, "is_running", False),
                 last_trade=None,
                 active_positions=len(positions),
-                current_regime=live.current_regime,
+                current_regime=getattr(live, "current_regime", "streaming"),
                 next_action="Live analysis running",
                 next_action_at=datetime.now() + timedelta(minutes=5),
             )
@@ -551,7 +645,7 @@ def main():
         journal=journal,
         thermo=_ThermoAdapter(thermo),
         benchmarks=_BenchmarkAdapter(),
-        health=_HealthAdapter(health, broker),
+        health=_HealthAdapter(health, live_broker),
         belief_synthesizer=synthesizer,
     )
     servicer._nav_history = nav_history
