@@ -1,8 +1,8 @@
 """Broker data types shared between real and mock brokers."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Optional
+from typing import List, Optional
 
 
 @dataclass
@@ -11,6 +11,19 @@ class AlpacaConfig:
     api_key: str
     secret_key: str
     paper: bool = True
+
+
+@dataclass
+class StreamConfig:
+    """Configuration for Alpaca streaming connections."""
+    portfolio_symbols: List[str] = field(default_factory=list)
+    reference_symbols: List[str] = field(default_factory=list)
+    macro_proxies: List[str] = field(default_factory=list)
+    data_feed: str = "iex"
+
+    @property
+    def all_symbols(self) -> list:
+        return sorted(set(self.portfolio_symbols + self.reference_symbols + self.macro_proxies))
 
 
 @dataclass

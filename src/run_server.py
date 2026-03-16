@@ -7,6 +7,7 @@ Usage:
 """
 
 import os
+import queue
 import sys
 import statistics
 from datetime import date, datetime, timedelta
@@ -18,7 +19,6 @@ from uuid import uuid4
 sys.path.insert(0, str(Path(__file__).parent))
 
 from fund.types import Fund, Instrument, WeeklyNAV
-from fund.mock_broker import MockBroker
 from fund.universe import InvestmentUniverse
 from fund.journal import EventJournal
 from fund.thermo_metrics import ThermoMetrics
@@ -28,6 +28,120 @@ from fund.supabase_sync import SupabaseSync, SupabaseConfig
 from fund.grpc_runner import run_server
 from fund.grpc_server import FundServiceServicer
 from fund.live_engine import LiveEngine
+from fund.broker_types import AlpacaConfig, StreamConfig, BrokerAccount, BrokerPosition, BrokerOrder
+from fund.price_cache import PriceCache
+from fund.stream_service import AlpacaStreamService
+from fund.observation_recorder import ObservationRecorder
+from fund.tempo import Tempo
+from fund.reactor import Reactor, ReactorConfig
+
+
+# ── Lightweight simulation broker (no API keys required) ─────────────────────
+
+class _SimBroker:
+    """In-memory broker for the run_server simulation script.
+
+    Replaced MockBroker after that class was deleted. Provides only the subset
+    of the AlpacaBroker interface used by sync_to_supabase and the main loop:
+    get_account(), get_positions(), seed_position(), seed_price().
+    """
+
+    def __init__(self, cash: Decimal = Decimal("100000")) -> None:
+        self._cash = cash
+        self._positions: dict = {}  # symbol -> (qty, avg_entry_price)
+        self._prices: dict = {}     # symbol -> Decimal
+
+    def seed_price(self, symbol: str, price: Decimal) -> None:
+        self._prices[symbol] = price
+
+    def seed_position(self, symbol: str, qty: Decimal, avg_price: Decimal) -> None:
+        self._positions[symbol] = (qty, avg_price)
+        if symbol not in self._prices:
+            self._prices[symbol] = avg_price
+
+    def get_account(self) -> BrokerAccount:
+        equity = self._cash + sum(
+            qty * self._prices.get(sym, avg)
+            for sym, (qty, avg) in self._positions.items()
+        )
+        return BrokerAccount(
+            cash=self._cash,
+            equity=equity,
+            buying_power=self._cash,
+            status="ACTIVE",
+        )
+
+    def get_positions(self) -> list:
+        result = []
+        for sym, (qty, avg) in self._positions.items():
+            if qty <= 0:
+                continue
+            price = self._prices.get(sym, avg)
+            mv = qty * price
+            cost = qty * avg
+            upl = mv - cost
+            upl_pct = float(upl / cost) if cost else 0.0
+            result.append(BrokerPosition(
+                symbol=sym,
+                quantity=qty,
+                market_value=mv,
+                avg_entry_price=avg,
+                current_price=price,
+                unrealized_pl=upl,
+                unrealized_pl_pct=upl_pct,
+            ))
+        return result
+
+
+# ── Null SiliconDB client (no-op for dev/test without SiliconDB running) ─────
+
+class _NullSiliconDB:
+    """Drop-in SiliconDB client that silently discards all calls.
+
+    Used when SILICONDB_URL is not reachable or in development mode.
+    """
+
+    def add_observation(self, obs: dict) -> None:
+        pass
+
+    def record_observation_batch(self, observations: list) -> None:
+        pass
+
+    def propagate(self, **kwargs) -> None:
+        pass
+
+    def add_cooccurrences(self, **kwargs) -> None:
+        pass
+
+    def epistemic_briefing(self, **kwargs) -> None:
+        pass
+
+    def insert_triples(self, **kwargs) -> None:
+        pass
+
+
+# ── Null stream service (no-op when no Alpaca credentials are set) ────────────
+
+class _NullStreamService:
+    """Drop-in AlpacaStreamService for use when ALPACA_API_KEY is not set.
+
+    Provides the minimal interface consumed by LiveEngine:
+    is_running, dropped_events, _event_queue, start(), stop().
+    """
+
+    def __init__(self, event_queue: queue.Queue) -> None:
+        self._event_queue = event_queue
+        self.dropped_events: int = 0
+
+    @property
+    def is_running(self) -> bool:
+        return False
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
 
 
 # ── Portfolio definition ──────────────────────────────────────────────────────
@@ -171,7 +285,7 @@ def fetch_spy_weekly(weeks: int = 52) -> dict:
     return spy_returns
 
 
-def sync_to_supabase(supabase: SupabaseSync, fund: Fund, broker: MockBroker,
+def sync_to_supabase(supabase: SupabaseSync, fund: Fund, broker: _SimBroker,
                      universe: InvestmentUniverse, nav_history: list,
                      health: HealthMonitor):
     """Push all fund state to Supabase for the web dashboard."""
@@ -305,7 +419,7 @@ def main():
     first_nav = nav_history[0]
     latest_nav = nav_history[-1]
 
-    broker = MockBroker(cash=STARTING_CASH)
+    broker = _SimBroker(cash=STARTING_CASH)
     for symbol, qty in HOLDINGS.items():
         current = latest_prices.get(symbol, 100)
         # Entry price = current price adjusted by portfolio return
@@ -360,15 +474,109 @@ def main():
     else:
         print("\n  Supabase sync skipped (no SUPABASE_SERVICE_ROLE_KEY set)")
 
-    # ── Start live engine (continuous analysis loop) ──────────
+    # ── Read streaming configuration from environment ─────────
+    broker_mode = os.environ.get("BROKER_MODE", "paper")
+    alpaca_api_key = os.environ.get("ALPACA_API_KEY", "")
+    alpaca_secret_key = os.environ.get("ALPACA_SECRET_KEY", "")
+    alpaca_data_feed = os.environ.get("ALPACA_DATA_FEED", "iex")
     silicondb_url = os.environ.get("SILICONDB_URL", "http://127.0.0.1:8642")
+    heartbeat_interval = int(os.environ.get("HEARTBEAT_INTERVAL", "300"))
+    thermo_cold = float(os.environ.get("THERMO_COLD", "0.3"))
+    thermo_warm = float(os.environ.get("THERMO_WARM", "0.6"))
+    thermo_hot = float(os.environ.get("THERMO_HOT", "0.8"))
+
+    portfolio_symbols_env = os.environ.get("PORTFOLIO_SYMBOLS", "")
+    reference_symbols_env = os.environ.get("REFERENCE_SYMBOLS", "SPY,QQQ,IWM,DIA")
+    macro_proxies_env = os.environ.get("MACRO_PROXIES", "TLT,USO,UUP,UVXY,GLD")
+
+    portfolio_syms = [s.strip() for s in portfolio_symbols_env.split(",") if s.strip()] or list(HOLDINGS.keys())
+    reference_syms = [s.strip() for s in reference_symbols_env.split(",") if s.strip()]
+    macro_syms = [s.strip() for s in macro_proxies_env.split(",") if s.strip()]
+
+    # ── Build SiliconDB client ─────────────────────────────────
+    try:
+        import requests as _req
+        _req.get(silicondb_url, timeout=2)
+        from silicondb import SiliconDBClient  # type: ignore[import]
+        silicondb_client = SiliconDBClient(url=silicondb_url)
+        print(f"  SiliconDB:       connected ({silicondb_url})")
+    except Exception:
+        silicondb_client = _NullSiliconDB()
+        print(f"  SiliconDB:       offline — using null client ({silicondb_url})")
+
+    # ── Build broker ───────────────────────────────────────────
+    live_broker = None
+    if alpaca_api_key and alpaca_secret_key:
+        try:
+            from fund.alpaca_broker import AlpacaBroker
+            alpaca_cfg = AlpacaConfig(
+                api_key=alpaca_api_key,
+                secret_key=alpaca_secret_key,
+                paper=(broker_mode != "live"),
+            )
+            live_broker = AlpacaBroker(alpaca_cfg)
+            print(f"  Broker:          AlpacaBroker ({broker_mode} mode)")
+        except Exception as exc:
+            print(f"  Broker:          AlpacaBroker failed ({exc}), falling back to sim broker")
+            live_broker = broker  # _SimBroker already built above
+    else:
+        live_broker = broker  # _SimBroker
+        print(f"  Broker:          SimBroker (no ALPACA_API_KEY set)")
+
+    # ── Build streaming components ─────────────────────────────
+    event_queue: queue.Queue = queue.Queue(maxsize=1000)
+    price_cache = PriceCache()
+
+    if alpaca_api_key and alpaca_secret_key:
+        try:
+            stream_cfg = StreamConfig(
+                portfolio_symbols=portfolio_syms,
+                reference_symbols=reference_syms,
+                macro_proxies=macro_syms,
+                data_feed=alpaca_data_feed,
+            )
+            stream_service = AlpacaStreamService(alpaca_cfg, stream_cfg, price_cache, event_queue)
+            print(f"  Stream:          AlpacaStreamService ({len(stream_cfg.all_symbols)} symbols, feed={alpaca_data_feed})")
+        except Exception as exc:
+            print(f"  Stream:          AlpacaStreamService init failed ({exc}), using null stream")
+            stream_service = _NullStreamService(event_queue)
+    else:
+        stream_service = _NullStreamService(event_queue)
+        print(f"  Stream:          NullStreamService (no ALPACA_API_KEY set)")
+
+    # ── Build observation, tempo, reactor ─────────────────────
+    observation_recorder = ObservationRecorder(price_cache, silicondb_client)
+    tempo = Tempo(
+        silicondb_client=silicondb_client,
+        cold_threshold=thermo_cold,
+        warm_threshold=thermo_warm,
+        hot_threshold=thermo_hot,
+    )
+    reactor_config = ReactorConfig(
+        portfolio_symbols=portfolio_syms,
+        reference_symbols=reference_syms,
+    )
+    reactor = Reactor(
+        silicondb_client=silicondb_client,
+        broker=live_broker,
+        supabase_sync=supabase,
+        price_cache=price_cache,
+        tempo=tempo,
+        config=reactor_config,
+    )
+
+    # ── Start live engine (streaming + heartbeat loop) ─────────
     live = LiveEngine(
-        symbols=PORTFOLIO_SYMBOLS,
+        symbols=portfolio_syms,
         fund=fund,
         supabase=supabase,
         synthesizer=synthesizer,
-        interval_seconds=300,  # every 5 minutes
-        silicondb_url=silicondb_url,
+        stream_service=stream_service,
+        observation_recorder=observation_recorder,
+        reactor=reactor,
+        tempo=tempo,
+        silicondb_client=silicondb_client,
+        interval_seconds=heartbeat_interval,
     )
     live.start()
 
@@ -384,10 +592,10 @@ def main():
         def create_heartbeat(self):
             positions = self._broker.get_positions()
             return self._monitor.create_heartbeat(
-                alpaca_connected=False,
+                alpaca_connected=getattr(live, "_stream", None) is not None and getattr(live._stream, "is_running", False),
                 last_trade=None,
                 active_positions=len(positions),
-                current_regime=live.current_regime,
+                current_regime=getattr(live, "current_regime", "streaming"),
                 next_action="Live analysis running",
                 next_action_at=datetime.now() + timedelta(minutes=5),
             )
@@ -437,7 +645,7 @@ def main():
         journal=journal,
         thermo=_ThermoAdapter(thermo),
         benchmarks=_BenchmarkAdapter(),
-        health=_HealthAdapter(health, broker),
+        health=_HealthAdapter(health, live_broker),
         belief_synthesizer=synthesizer,
     )
     servicer._nav_history = nav_history

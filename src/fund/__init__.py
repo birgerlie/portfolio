@@ -33,6 +33,11 @@ from fund.grpc_runner import create_server, run_server
 from fund.supabase_sync import SupabaseSync, SupabaseConfig
 from fund.notifications import NotificationManager
 from fund.email_reports import EmailReporter
+from fund.price_cache import PriceCache, PriceEntry
+from fund.stream_service import AlpacaStreamService, StreamEvent
+from fund.observation_recorder import ObservationRecorder
+from fund.tempo import Tempo, ThermoTier
+from fund.reactor import Reactor, ReactorConfig
 
 __all__ = [
     "Fund", "Member", "Transaction", "TransactionType", "TransactionStatus",
@@ -48,4 +53,9 @@ __all__ = [
     "SupabaseSync", "SupabaseConfig",
     "NotificationManager",
     "EmailReporter",
+    "PriceCache", "PriceEntry",
+    "AlpacaStreamService", "StreamEvent",
+    "ObservationRecorder",
+    "Tempo", "ThermoTier",
+    "Reactor", "ReactorConfig",
 ]

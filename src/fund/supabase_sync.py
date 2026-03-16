@@ -1,9 +1,12 @@
 """Push fund data to Supabase for the web dashboard."""
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
 
 
 def _id() -> str:
@@ -53,3 +56,32 @@ class SupabaseSync:
         """Insert a notification row for web push via Supabase Realtime."""
         notification.setdefault("id", _id())
         self._client.table("notifications").insert(notification).execute()
+
+    def load_fund_state(self) -> dict:
+        """Load latest fund snapshot from Supabase for startup hydration."""
+        try:
+            result = self._client.table("fund_snapshots").select("*").order("updated_at", desc=True).limit(1).execute()
+            if result.data:
+                return result.data[0]
+            return {}
+        except Exception as e:
+            logger.error("Failed to load fund state: %s", e)
+            return {}
+
+    def load_members(self) -> list:
+        """Load all members from Supabase."""
+        try:
+            result = self._client.table("members").select("*").execute()
+            return result.data or []
+        except Exception as e:
+            logger.error("Failed to load members: %s", e)
+            return []
+
+    def load_positions(self) -> list:
+        """Load current positions from Supabase."""
+        try:
+            result = self._client.table("positions").select("*").execute()
+            return result.data or []
+        except Exception as e:
+            logger.error("Failed to load positions: %s", e)
+            return []

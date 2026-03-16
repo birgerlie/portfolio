@@ -163,6 +163,36 @@ MARKET_STRUCTURE = [
 ]
 
 
+MACRO_PROXIES = [
+    ("TLT", "proxy_for", "interest_rates", 0.9),
+    ("USO", "proxy_for", "oil_prices", 0.9),
+    ("UUP", "proxy_for", "usd_strength", 0.8),
+    ("UVXY", "proxy_for", "market_fear", 0.8),
+    ("GLD", "proxy_for", "gold_prices", 0.9),
+    ("IWM", "proxy_for", "russell2000", 1.0),
+]
+
+MACRO_PROXY_SYMBOLS = [m[0] for m in MACRO_PROXIES]
+
+NEW_OBSERVABLES = ["vwap", "spread", "trade_intensity", "volume_anomaly"]
+
+TEMPORAL_PREDICATES = ["leads", "co_moves_with", "inversely_correlated"]
+
+REFERENCE_BENCHMARKS = {
+    "technology": "QQQ",
+    "communication_services": "QQQ",
+    "consumer_cyclical": "SPY",
+    "consumer_defensive": "SPY",
+    "healthcare": "SPY",
+    "financials": "SPY",
+    "industrials": "DIA",
+    "energy": "SPY",
+    "utilities": "SPY",
+    "real_estate": "SPY",
+    "materials": "SPY",
+}
+
+
 def _fetch_sp500_tickers() -> List[str]:
     """Fetch S&P 500 tickers from Wikipedia."""
     import io
@@ -363,6 +393,35 @@ def build_ontology(use_network: bool = True) -> List[Triple]:
     # ── Market structure ─────────────────────────────────────────────────
     for subj, pred, obj, weight in MARKET_STRUCTURE:
         triples.append(Triple(subj, pred, obj, weight))
+
+    # ── Macro proxy triples ───────────────────────────────────────────────
+    for proxy_symbol, pred, obj, weight in MACRO_PROXIES:
+        triples.append(Triple(proxy_symbol, pred, obj, weight))
+        triples.append(Triple(proxy_symbol, "is_a", "instrument", 1.0))
+        for obs in OBSERVABLES + NEW_OBSERVABLES:
+            node_id = f"{proxy_symbol}:{obs}"
+            triples.append(Triple(proxy_symbol, f"has_{obs}", node_id, 1.0))
+            triples.append(Triple(node_id, "property_of", proxy_symbol, 1.0))
+            triples.append(Triple(node_id, "is_a", obs, 1.0))
+
+    # ── New observables for all tickers ──────────────────────────────────
+    for symbol in all_tickers:
+        for obs in NEW_OBSERVABLES:
+            node_id = f"{symbol}:{obs}"
+            triples.append(Triple(symbol, f"has_{obs}", node_id, 1.0))
+            triples.append(Triple(node_id, "property_of", symbol, 1.0))
+            triples.append(Triple(node_id, "is_a", obs, 1.0))
+
+    # ── Benchmark edges ───────────────────────────────────────────────────
+    for symbol, info in sectors.items():
+        raw_sector = info.get("sector", "")
+        sector_id = SECTOR_NORMALIZE.get(raw_sector, raw_sector.lower().replace(" ", "_"))
+        if sector_id and sector_id in REFERENCE_BENCHMARKS:
+            benchmark = REFERENCE_BENCHMARKS[sector_id]
+            triples.append(Triple(symbol, "benchmarked_against", benchmark, 1.0))
+
+    for proxy_symbol in MACRO_PROXY_SYMBOLS:
+        triples.append(Triple(proxy_symbol, "benchmarked_against", "SPY", 1.0))
 
     logger.info(
         "Ontology built: %d triples, %d tickers, %d sectors",
