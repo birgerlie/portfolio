@@ -4,6 +4,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional, Set
 
+from fund.quote_aggregator import QuoteAggregator
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,7 +35,13 @@ class ObservationRecorder:
         # Symbols flagged as volume anomalies since last get_anomalies() call
         self._anomalies: List[str] = []
 
+        self._quote_agg = QuoteAggregator(window_seconds=batch_interval)
+
     # ── public API ───────────────────────────────────────────────────────────
+
+    def record_quote(self, symbol: str, bid: float, ask: float, timestamp: float):
+        """Record a quote for aggregation."""
+        self._quote_agg.record(symbol, bid, ask, timestamp)
 
     def record_symbol(self, symbol: str) -> None:
         """Mark *symbol* as pending for the next flush.  Deduplicates automatically."""
@@ -65,6 +73,23 @@ class ObservationRecorder:
                 self._silicondb.record_observation_batch(batch)
             except Exception as exc:
                 logger.warning("SiliconDB batch error (%d obs): %s", len(batch), exc)
+
+        # Flush aggregated quotes as spread observations
+        quote_data = self._quote_agg.flush()
+        if quote_data:
+            quote_obs = []
+            for symbol, data in quote_data.items():
+                quote_obs.append({
+                    "external_id": f"{symbol}:spread",
+                    "confirmed": True,
+                    "source": "alpaca_stream",
+                    "metadata": {"value": data["mean_spread"], "symbol": symbol},
+                })
+            if quote_obs:
+                try:
+                    self._silicondb.record_observation_batch(quote_obs)
+                except Exception as exc:
+                    logger.warning("SiliconDB quote batch error: %s", exc)
 
     def set_volume_baseline(self, symbol: str, avg_daily_volume: float) -> None:
         """Set the 20-day average daily volume baseline for *symbol*."""

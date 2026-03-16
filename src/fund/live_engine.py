@@ -20,6 +20,8 @@ _C = {
     "regime": "\033[91m",    # bright red
     "belief": "\033[93m",    # bright yellow
     "briefing": "\033[95m",  # bright magenta
+    "signal": "\033[92m",    # bright green
+    "decay": "\033[90m",     # gray
     "reset": "\033[0m",
 }
 
@@ -53,6 +55,7 @@ class LiveEngine:
         broker=None,             # AlpacaBroker
         interval_seconds: int = 300,
         verbose: bool = True,
+        signal_tracker=None,
     ):
         self._symbols = symbols
         self._fund = fund
@@ -67,6 +70,7 @@ class LiveEngine:
         self._broker = broker
         self._interval = interval_seconds
         self._verbose = verbose
+        self._signal_tracker = signal_tracker
         self._stop_event = threading.Event()
         self._event_queue = stream_service._event_queue
         self._event_count = 0
@@ -116,8 +120,13 @@ class LiveEngine:
                     size = event.data.get("size", "")
                     _log_event("trade", event.symbol, f"${price} x{size}")
             elif event.kind == "quote":
-                self._recorder.record_symbol(event.symbol)
-                if self._verbose and self._event_count % 100 == 0:  # throttle quote logs
+                self._recorder.record_quote(
+                    event.symbol,
+                    event.data.get("bid", 0),
+                    event.data.get("ask", 0),
+                    event.timestamp,
+                )
+                if self._verbose and self._event_count % 500 == 0:
                     bid = event.data.get("bid", "")
                     ask = event.data.get("ask", "")
                     _log_event("quote", event.symbol, f"bid=${bid} ask=${ask}")
