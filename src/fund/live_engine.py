@@ -16,6 +16,8 @@ _C = {
     "anomaly": "\033[33m",   # yellow
     "thermo": "\033[35m",    # magenta
     "regime": "\033[91m",    # bright red
+    "belief": "\033[93m",    # bright yellow
+    "briefing": "\033[95m",  # bright magenta
     "reset": "\033[0m",
 }
 
@@ -64,6 +66,9 @@ class LiveEngine:
         self._event_count = 0
 
     def start(self):
+        # Register percolator rules if native SiliconDB client
+        self._setup_percolator()
+
         self._stream.start()
         self._consumer_thread = threading.Thread(
             target=self._consume_events, daemon=True, name="event-consumer",
@@ -73,7 +78,11 @@ class LiveEngine:
             target=self._heartbeat_loop, daemon=True, name="heartbeat",
         )
         self._heartbeat_thread.start()
-        logger.info("LiveEngine started: streaming + consumer + heartbeat")
+        self._percolator_thread = threading.Thread(
+            target=self._percolator_loop, daemon=True, name="percolator",
+        )
+        self._percolator_thread.start()
+        logger.info("LiveEngine started: streaming + consumer + percolator + heartbeat")
 
     def stop(self):
         self._stop_event.set()
@@ -123,6 +132,117 @@ class LiveEngine:
             self._supabase.push_heartbeat(self._build_heartbeat())
         except Exception as e:
             logger.error("Fill sync failed: %s", e)
+
+    # ── percolator ──────────────────────────────────────────────────────────
+
+    def _setup_percolator(self):
+        """Register percolator rules and enable event log on native SiliconDB."""
+        if not hasattr(self._silicondb, 'enable_event_log'):
+            logger.info("SiliconDB client does not support percolator — skipping")
+            return
+
+        try:
+            self._silicondb.enable_event_log(capacity=5000)
+
+            # Clean up any stale rules from previous runs
+            try:
+                for rule in self._silicondb.list_event_rules():
+                    self._silicondb.delete_event_rule(rule.get("name", rule) if isinstance(rule, dict) else str(rule))
+            except Exception:
+                pass
+
+            # Nervous tier: fires on any observation
+            self._silicondb.create_event_rule(
+                name="belief-updated",
+                emit_event_type="belief-updated",
+                filter={"event_type": "observation_recorded"},
+                conditions=[],
+                cooldown_ms=0,
+            )
+
+            # Standard tier: fires on contradiction
+            self._silicondb.create_event_rule(
+                name="contradiction-detected",
+                emit_event_type="contradiction-detected",
+                filter={"event_type": "contradiction_found"},
+                conditions=[],
+                cooldown_ms=10_000,
+            )
+
+            rules = self._silicondb.list_event_rules()
+            _log_event("belief", "", f"Percolator: {len(rules)} rules registered, event log capacity=5000")
+        except Exception as e:
+            logger.error("Failed to setup percolator: %s", e)
+
+    def _percolator_loop(self):
+        """Poll SiliconDB for thermo state and run analysis on a tempo-adaptive interval."""
+        import time
+
+        while not self._stop_event.is_set():
+            # Adaptive sleep based on tempo
+            cooldown = self._tempo.get_cooldown_ms()
+            sleep_secs = (cooldown / 1000.0) if cooldown else 30.0
+            if self._stop_event.wait(sleep_secs):
+                break
+
+            try:
+                # Check thermo state
+                if hasattr(self._silicondb, 'thermo_state'):
+                    thermo = self._silicondb.thermo_state()
+                    if thermo:
+                        temp = thermo.get("temperature", 0.0) if isinstance(thermo, dict) else getattr(thermo, "temperature", 0.0)
+                        entropy = thermo.get("entropy_production", 0.0) if isinstance(thermo, dict) else getattr(thermo, "entropy_production", 0.0)
+                        criticality = thermo.get("criticality", 0.0) if isinstance(thermo, dict) else getattr(thermo, "criticality", 0.0)
+
+                        old_tier = self._tempo.current_tier
+                        changed = self._tempo.update_temperature(temp)
+                        if changed or self._verbose:
+                            _log_event("thermo", "", f"temp={temp:.3f} entropy={entropy:.3f} crit={criticality:.3f} tier={self._tempo.current_tier.value}")
+
+                        if changed:
+                            self._reactor.on_thermo_shift({"temperature": temp})
+
+                # Check for contradictions
+                if hasattr(self._silicondb, 'detect_contradictions'):
+                    contradictions = self._silicondb.detect_contradictions(samples=20, min_conflict_score=0.3, max_results=5)
+                    if contradictions:
+                        n = len(contradictions) if isinstance(contradictions, list) else 0
+                        if n > 0 and self._verbose:
+                            _log_event("belief", "", f"{n} contradictions detected")
+                        if n > 0 and self._tempo.should_analyze():
+                            self._reactor.on_significant_shift({"contradictions": n})
+
+                # Request epistemic briefing if warm+
+                if self._tempo.should_analyze() and hasattr(self._silicondb, 'epistemic_briefing'):
+                    briefing = self._silicondb.epistemic_briefing(
+                        topic="market", budget=20, anchor_ratio=0.3, hops=2, neighbor_k=5,
+                    )
+                    if briefing and self._verbose:
+                        if isinstance(briefing, dict):
+                            anchors = len(briefing.get("anchors", []))
+                            surprises = len(briefing.get("surprises", []))
+                            conflicts = len(briefing.get("conflicts", []))
+                            gaps = len(briefing.get("gaps", []))
+                        else:
+                            anchors = len(getattr(briefing, "anchors", []))
+                            surprises = len(getattr(briefing, "surprises", []))
+                            conflicts = len(getattr(briefing, "conflicts", []))
+                            gaps = len(getattr(briefing, "gaps", []))
+                        _log_event("briefing", "", f"anchors={anchors} surprises={surprises} conflicts={conflicts} gaps={gaps}")
+
+                # Drain percolator events
+                if hasattr(self._silicondb, 'event_sequence'):
+                    try:
+                        events = self._silicondb.replay_events(since_sequence=0, limit=50)
+                        if events and len(events) > 0 and self._verbose:
+                            for evt in events[-5:]:  # show last 5
+                                evt_type = evt.get("event_type", "?") if isinstance(evt, dict) else str(evt)
+                                _log_event("belief", "", f"percolator: {evt_type}")
+                    except Exception:
+                        pass
+
+            except Exception as e:
+                logger.error("Percolator loop error: %s", e)
 
     # ── heartbeat ─────────────────────────────────────────────────────────────
 
