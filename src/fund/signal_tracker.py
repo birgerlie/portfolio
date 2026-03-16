@@ -41,13 +41,17 @@ class SignalTracker:
         new_signals: List[Signal] = []
 
         # Step 1: fetch uncertain symbols (high entropy / noisy)
+        uncertain_set: set = set()
         try:
-            uncertain_set: set = set(
-                self._silicondb.get_uncertain_beliefs(min_entropy=0.5, k=200)
-            )
+            uncertain_beliefs = self._silicondb.get_uncertain_beliefs(min_entropy=0.5, k=200)
+            if uncertain_beliefs:
+                for b in uncertain_beliefs:
+                    ext_id = b.get("external_id", "") if isinstance(b, dict) else str(b)
+                    sym = ext_id.split(":")[0] if ":" in ext_id else ext_id
+                    if sym:
+                        uncertain_set.add(sym)
         except Exception as exc:
             logger.warning("SignalTracker: get_uncertain_beliefs failed: %s", exc)
-            uncertain_set = set()
 
         for symbol in all_symbols:
             # Skip portfolio holdings and crypto pairs
@@ -65,11 +69,13 @@ class SignalTracker:
             entropy = 0.2
 
             # Get node temperature
+            node_temperature = 0.0
             try:
-                node_temperature: float = self._silicondb.node_thermo(f"{symbol}:return")
+                thermo = self._silicondb.node_thermo(f"{symbol}:return")
+                if thermo:
+                    node_temperature = thermo.get("temperature", 0.0) if isinstance(thermo, dict) else float(thermo)
             except Exception as exc:
                 logger.warning("SignalTracker: node_thermo(%s) failed: %s", symbol, exc)
-                node_temperature = 0.0
 
             signal_strength = (1.0 - entropy) * max(node_temperature, 0.01)
 

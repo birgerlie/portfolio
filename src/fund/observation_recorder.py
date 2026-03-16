@@ -111,8 +111,11 @@ class ObservationRecorder:
             self._obs(f"{symbol}:price", {"value": float(entry.price), "symbol": symbol}),
             self._obs(f"{symbol}:vwap", {"value": float(entry.vwap), "symbol": symbol}),
             self._obs(f"{symbol}:trade_intensity", {"value": int(entry.trade_count), "symbol": symbol}),
-            self._obs(f"{symbol}:spread", {"value": float(entry.spread), "symbol": symbol}),
         ]
+        if entry.spread is not None and entry.spread > 0:
+            observations.append(
+                self._obs(f"{symbol}:spread", {"value": float(entry.spread), "symbol": symbol})
+            )
 
         # Volume anomaly detection
         baseline = self._volume_baselines.get(symbol)
