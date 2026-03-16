@@ -108,7 +108,8 @@ class LiveEngine:
                     size = event.data.get("size", "")
                     _log_event("trade", event.symbol, f"${price} x{size}")
             elif event.kind == "quote":
-                if self._verbose:
+                self._recorder.record_symbol(event.symbol)
+                if self._verbose and self._event_count % 100 == 0:  # throttle quote logs
                     bid = event.data.get("bid", "")
                     ask = event.data.get("ask", "")
                     _log_event("quote", event.symbol, f"bid=${bid} ask=${ask}")
