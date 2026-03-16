@@ -85,3 +85,20 @@ class SupabaseSync:
         except Exception as e:
             logger.error("Failed to load positions: %s", e)
             return []
+
+    def push_signals(self, signals: list) -> None:
+        """Upsert active signals to Supabase."""
+        try:
+            for sig in signals:
+                self._client.table("signals").upsert({
+                    "symbol": sig["symbol"],
+                    "signal_strength": sig["signal_strength"],
+                    "entropy": sig["entropy"],
+                    "node_temperature": sig["node_temperature"],
+                    "belief_type": sig.get("belief_type", "unknown"),
+                    "conviction": sig.get("conviction", 0),
+                    "last_seen": datetime.utcnow().isoformat(),
+                    "status": sig.get("status", "active"),
+                }, on_conflict="symbol,status").execute()
+        except Exception as e:
+            logger.error("Failed to push signals: %s", e)

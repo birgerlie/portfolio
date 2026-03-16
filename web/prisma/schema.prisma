@@ -179,6 +179,24 @@ model Invite {
   @@map("invites")
 }
 
+// ── Signals ───────────────────────────────────────────────────────────────
+
+model Signal {
+  id              String   @id @default(cuid())
+  symbol          String
+  signalStrength  Float    @map("signal_strength")
+  entropy         Float
+  nodeTemperature Float    @map("node_temperature")
+  beliefType      String   @map("belief_type") @default("unknown")
+  conviction      Float    @default(0)
+  firstSeen       DateTime @map("first_seen") @default(now())
+  lastSeen        DateTime @map("last_seen") @default(now())
+  status          String   @default("active")
+
+  @@unique([symbol, status])
+  @@map("signals")
+}
+
 // ── Notifications ──────────────────────────────────────────────────────────
 
 model Notification {
