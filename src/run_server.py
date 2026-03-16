@@ -496,20 +496,24 @@ def main():
     reference_syms = [s.strip() for s in reference_symbols_env.split(",") if s.strip()]
     macro_syms = [s.strip() for s in macro_proxies_env.split(",") if s.strip()]
 
-    # ── Build SiliconDB client (prefer gRPC, fallback to HTTP) ──
-    grpc_target = os.environ.get("SILICONDB_GRPC_TARGET", "localhost:50051")
+    # ── Start embedded SiliconDB (native client with full API) ──
+    silicondb_db_path = os.environ.get("SILICONDB_DB_PATH", os.path.expanduser("~/.fund/silicondb"))
     try:
-        from silicondb import SiliconDBClient  # type: ignore[import]
-        silicondb_client = SiliconDBClient(
-            base_url=silicondb_url,
-            grpc_target=grpc_target,
+        from silicondb import SiliconDB as SiliconDBNative  # type: ignore[import]
+
+        silicondb_client = SiliconDBNative(
+            silicondb_db_path,
+            enable_beliefs=True,
+            enable_theme_discovery=True,
         )
-        # Verify connection
-        silicondb_client.status()
-        print(f"  SiliconDB:       connected (gRPC={grpc_target}, HTTP={silicondb_url})")
-    except Exception:
+        print(f"  SiliconDB:       embedded native client (beliefs=ON, themes=ON)")
+        print(f"  SiliconDB:       path={silicondb_db_path}")
+        print(f"  SiliconDB:       thermo_state={hasattr(silicondb_client, 'thermo_state')}, "
+              f"epistemic_briefing={hasattr(silicondb_client, 'epistemic_briefing')}, "
+              f"subscribe_events={hasattr(silicondb_client, 'subscribe_events')}")
+    except Exception as exc:
         silicondb_client = _NullSiliconDB()
-        print(f"  SiliconDB:       offline — using null client ({silicondb_url})")
+        print(f"  SiliconDB:       failed to start embedded ({exc}), using null client")
 
     # ── Build broker ───────────────────────────────────────────
     live_broker = None

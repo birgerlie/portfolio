@@ -1,0 +1,3 @@
+[submodule "lib/silicondb"]
+	path = lib/silicondb
+	url = git@github.com:birgerlie/SiliconDB.git
