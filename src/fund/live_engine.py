@@ -25,6 +25,45 @@ _C = {
     "reset": "\033[0m",
 }
 
+# Pretty names for internal identifiers
+_PRETTY = {
+    # Strategies
+    "kelly_monthly_rebalance": "Kelly Criterion (Monthly Rebalance)",
+    "kelly_inverse_hedge": "Kelly Criterion (Inverse Hedge)",
+    "equal_weight_inverse_hedge": "Equal Weight (Inverse Hedge)",
+    "kelly_dynamic_hedge": "Kelly Criterion (Dynamic Hedge)",
+    "belief_weighted": "Belief-Weighted Allocation",
+    "stop_loss_20pct": "Stop-Loss 20%",
+    # Regimes
+    "BULL": "Bull Market",
+    "BEAR": "Bear Market",
+    "CONSOLIDATION": "Consolidation",
+    "TRANSITION": "Regime Transition",
+    "bull": "Bull Market",
+    "bear": "Bear Market",
+    "consolidation": "Consolidation",
+    "transition": "Regime Transition",
+    # Belief types
+    "high_growth": "High Growth",
+    "stable": "Stable",
+    "declining": "Declining",
+}
+
+
+def _pretty(name: str) -> str:
+    return _PRETTY.get(name, name.replace("_", " ").title())
+
+
+# System prompt for all financial narratives
+_FINANCE_SYSTEM = (
+    "You are a senior portfolio strategist at a quantitative investment fund. "
+    "Write in precise financial language using terms like alpha, beta, conviction, "
+    "risk-adjusted return, drawdown, correlation, mean reversion, momentum, "
+    "factor exposure, regime shift, volatility clustering, and sector rotation. "
+    "Be concise (1-3 sentences). Never use marketing language. "
+    "Speak as you would in a morning research briefing to the investment committee."
+)
+
 
 def _log_event(kind: str, symbol: str, detail: str = "") -> None:
     """Print a colored event line to console."""
@@ -227,12 +266,12 @@ class LiveEngine:
                             if self._synthesizer and hasattr(self._synthesizer, '_complete'):
                                 try:
                                     narrative = self._synthesizer._complete(
-                                        "You are a quantitative fund analyst monitoring a belief engine's thermodynamic state. "
-                                        "Write 1-2 sentences explaining what the temperature shift means for the portfolio. Be specific about what's changing.",
-                                        f"Temperature shifted from {old_tier.value} to {self._tempo.current_tier.value}.\n"
-                                        f"Temperature: {temp:.3f}, Entropy production: {entropy:.3f}, Criticality: {criticality:.3f}\n"
-                                        f"Portfolio symbols: {', '.join(self._symbols)}\n"
-                                        f"Current regime: {self._current_regime or 'unknown'}",
+                                        _FINANCE_SYSTEM,
+                                        f"Market conviction temperature shifted from {_pretty(old_tier.value)} to {_pretty(self._tempo.current_tier.value)}.\n"
+                                        f"Temperature: {temp:.3f} (belief volatility), Entropy: {entropy:.3f} (uncertainty rate), Criticality: {criticality:.3f} (phase transition proximity)\n"
+                                        f"Holdings: {', '.join(self._symbols)}\n"
+                                        f"Current regime: {_pretty(self._current_regime or 'unknown')}\n"
+                                        f"Assess implications for position sizing, hedging, and factor exposure.",
                                         fallback="",
                                     )
                                     if narrative:
@@ -266,12 +305,11 @@ class LiveEngine:
                                         )
                                         if contra_str:
                                             narrative = self._synthesizer._complete(
-                                                "You are a quantitative fund analyst. The belief engine detected contradictions "
-                                                "between market beliefs. Write 1-2 sentences explaining what these contradictions "
-                                                "mean and whether the portfolio should act. Be specific about the symbols involved.",
-                                                f"Contradictions found:\n{contra_str}\n"
-                                                f"Portfolio: {', '.join(self._symbols)}\n"
-                                                f"Current regime: {self._current_regime or 'unknown'}",
+                                                _FINANCE_SYSTEM,
+                                                f"Cross-factor belief divergence detected:\n{contra_str}\n"
+                                                f"Holdings: {', '.join(self._symbols)}\n"
+                                                f"Regime: {_pretty(self._current_regime or 'unknown')}\n"
+                                                f"Assess correlation breakdown, mean reversion opportunity, and hedging implications.",
                                                 fallback="",
                                             )
                                             if narrative:
@@ -304,14 +342,13 @@ class LiveEngine:
                                 anchor_str = ", ".join(str(a) for a in anchors[:3]) if anchors else "none"
                                 surprise_str = ", ".join(str(s) for s in surprises[:3]) if surprises else "none"
                                 narrative = self._synthesizer._complete(
-                                    "You are a quantitative fund analyst. SiliconDB's epistemic briefing surfaced "
-                                    "the following insights. Write 2-3 sentences synthesizing what this means "
-                                    "for the portfolio. Focus on actionable insights.",
-                                    f"Anchors (stable high-confidence beliefs): {anchor_str}\n"
-                                    f"Surprises (unexpected beliefs): {surprise_str}\n"
-                                    f"Conflicts: {len(conflicts)}, Gaps: {len(gaps)}\n"
-                                    f"Portfolio: {', '.join(self._symbols)}\n"
-                                    f"Regime: {self._current_regime or 'unknown'}",
+                                    _FINANCE_SYSTEM,
+                                    f"High-conviction anchors (core alpha drivers): {anchor_str}\n"
+                                    f"Surprise signals (information edge): {surprise_str}\n"
+                                    f"Active conflicts: {len(conflicts)}, Knowledge gaps: {len(gaps)}\n"
+                                    f"Holdings: {', '.join(self._symbols)}\n"
+                                    f"Regime: {_pretty(self._current_regime or 'unknown')}\n"
+                                    f"Synthesize risk-adjusted positioning and factor tilts.",
                                     fallback="",
                                 )
                                 if narrative:
@@ -408,11 +445,11 @@ class LiveEngine:
             strategy_name = state.selected_strategy.name if hasattr(state.selected_strategy, 'name') else str(state.selected_strategy)
 
             if self._verbose:
-                _log_event("regime", "", f"{regime_name} | strategy={strategy_name} | confidence={state.confidence:.2f}")
+                _log_event("regime", "", f"{_pretty(regime_name)} | {_pretty(strategy_name)} | confidence {state.confidence:.0%}")
 
             # Check for regime change
             if self._current_regime and regime_name != self._current_regime:
-                _log_event("regime", "", f"REGIME CHANGE: {self._current_regime} → {regime_name}")
+                _log_event("regime", "", f"REGIME SHIFT: {_pretty(self._current_regime)} → {_pretty(regime_name)}")
 
                 # Execute trades from the execution plan
                 if state.execution_plan and state.execution_plan.trades:
@@ -427,15 +464,20 @@ class LiveEngine:
                                 qty = Decimal(str(int(target_value / price)))
                                 if qty > 0:
                                     order = self._broker.submit_market_order(symbol=symbol, qty=qty, side=side)
-                                    _log_event("fill", symbol, f"{side.upper()} {qty} @ ~${price:.2f} ({trade.reason})")
+                                    _log_event("fill", symbol, f"{side.upper()} {qty} shares @ ${price:,.2f} ({_pretty(trade.reason)})")
 
                                     # Generate narrative for this trade
-                                    if self._synthesizer and hasattr(self._synthesizer, 'synthesize_decision'):
+                                    if self._synthesizer and hasattr(self._synthesizer, '_complete'):
                                         try:
-                                            narrative = self._synthesizer.synthesize_decision(
-                                                action={"type": side.upper(), "symbol": symbol, "quantity": str(qty), "price": str(price)},
-                                                beliefs=[],
-                                                thermo={},
+                                            narrative = self._synthesizer._complete(
+                                                _FINANCE_SYSTEM,
+                                                f"Trade executed: {side.upper()} {qty} shares of {symbol} at ${price:,.2f}\n"
+                                                f"Strategy: {_pretty(strategy_name)}\n"
+                                                f"Regime: {_pretty(regime_name)}\n"
+                                                f"Conviction: {state.confidence:.0%}\n"
+                                                f"Reason: {trade.reason}\n"
+                                                f"Explain the risk-reward rationale for this execution.",
+                                                fallback="",
                                             )
                                             _log_event("briefing", symbol, narrative)
                                         except Exception:
