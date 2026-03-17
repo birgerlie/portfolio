@@ -241,21 +241,14 @@ class AlpacaStreamService:
             streams.append(self._crypto_stream._run_forever())
             logger.info("Crypto stream: %d symbols", len(crypto_symbols))
 
-        # Stock stream (may fail if connection limit exceeded — crypto continues)
+        # Stock stream — trades only to stay under Alpaca's 405 subscription limit
         if symbols:
             try:
                 self._stock_stream.subscribe_trades(self._handle_trade, *symbols)
-                priority = sorted(set(
-                    self._stream_config.portfolio_symbols +
-                    self._stream_config.reference_symbols +
-                    self._stream_config.macro_proxies
-                ))
-                if priority:
-                    self._stock_stream.subscribe_quotes(self._handle_quote, *priority)
-                logger.info("Stock stream: %d trade subs, %d quote subs", len(symbols), len(priority))
+                logger.info("Stock stream: %d trade-only subs (no quotes — saving subscription slots)", len(symbols))
                 streams.append(self._stock_stream._run_forever())
             except Exception as exc:
-                logger.error("Stock stream subscription failed: %s — crypto continues", exc)
+                logger.error("Stock stream failed: %s — crypto continues", exc)
 
         self._trading_stream.subscribe_trade_updates(self._handle_fill)
         streams.append(self._trading_stream._run_forever())
