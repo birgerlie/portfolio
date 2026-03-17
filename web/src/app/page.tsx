@@ -46,6 +46,11 @@ export default async function Dashboard() {
     orderBy: { updatedAt: "desc" },
   });
 
+  const narratives = await prisma.narrative.findMany({
+    orderBy: { createdAt: "desc" },
+    take: 20,
+  });
+
   const currentValue = member && snapshot
     ? member.units * snapshot.navPerUnit
     : snapshot?.nav ?? 0;
@@ -79,6 +84,8 @@ export default async function Dashboard() {
       </section>
 
       {journal && <EngineAnalysis journal={journal} regime={heartbeat?.currentRegime ?? ""} />}
+
+      {narratives.length > 0 && <NarrativeFeed narratives={narratives} />}
 
       <PositionList
         positions={positions}
@@ -199,6 +206,56 @@ function EngineAnalysis({ journal, regime }: { journal: { regimeSummary: string;
           <span className="text-[10px] text-white/30">
             {beliefEngine === "silicondb" ? "Beliefs powered by SiliconDB epistemology" : "Local belief classification"}
           </span>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function NarrativeFeed({ narratives }: { narratives: { id: string; kind: string; symbol: string; content: string; createdAt: Date }[] }) {
+  const kindIcons: Record<string, string> = {
+    thermo: "\u{1F321}",
+    contradiction: "\u{26A0}",
+    briefing: "\u{1F4CB}",
+    trade: "\u{1F4B9}",
+    regime: "\u{1F310}",
+  };
+  const kindColors: Record<string, string> = {
+    thermo: "text-purple-400",
+    contradiction: "text-[#f76e6e]",
+    briefing: "text-blue-400",
+    trade: "text-[#3dd68c]",
+    regime: "text-yellow-400",
+  };
+
+  return (
+    <section className="max-w-5xl mx-auto px-6 pb-12">
+      <div className="border border-white/[0.06] rounded-lg overflow-hidden">
+        <div className="px-5 py-3 border-b border-white/[0.06]">
+          <h2 className="text-[11px] uppercase tracking-[0.05em] text-white/40 font-medium">Market Intelligence</h2>
+        </div>
+        <div className="divide-y divide-white/[0.03]">
+          {narratives.map((n) => (
+            <div key={n.id} className="px-5 py-3 hover:bg-white/[0.02] transition-colors">
+              <div className="flex items-start gap-3">
+                <span className="text-[13px] mt-0.5">{kindIcons[n.kind] || "\u{2022}"}</span>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className={`text-[11px] font-medium uppercase tracking-[0.05em] ${kindColors[n.kind] || "text-white/40"}`}>
+                      {n.kind}
+                    </span>
+                    {n.symbol && (
+                      <span className="text-[11px] text-white/65 font-medium">{n.symbol}</span>
+                    )}
+                    <span className="text-[10px] text-white/25 ml-auto">
+                      {new Date(n.createdAt).toLocaleTimeString()}
+                    </span>
+                  </div>
+                  <p className="text-[13px] text-white/65 leading-relaxed">{n.content}</p>
+                </div>
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     </section>

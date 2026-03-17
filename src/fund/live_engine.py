@@ -84,14 +84,22 @@ _FINANCE_SYSTEM = (
 )
 
 
-def _log_event(kind: str, symbol: str, detail: str = "") -> None:
-    """Print a colored event line to console."""
+def _log_event(kind: str, symbol: str, detail: str = "", engine=None) -> None:
+    """Print a colored event line to console and optionally record narrative."""
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
     color = _C.get(kind, "")
     reset = _C["reset"]
     tag = kind.upper().ljust(7)
     sym = symbol.ljust(6) if symbol else "      "
     print(f"{color}[{ts}] {tag} {sym} {detail}{reset}")
+    # Record narratives (briefing-type events) for journal synthesis
+    if engine is not None and kind == "briefing" and detail:
+        engine._narratives.append({
+            "kind": kind,
+            "symbol": symbol,
+            "content": detail,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
 
 
 class LiveEngine:
@@ -134,6 +142,7 @@ class LiveEngine:
         self._event_count = 0
         self._current_regime = None
         self._last_analysis = None
+        self._narratives: list = []  # accumulate between heartbeats
 
     def start(self):
         # Register percolator rules if native SiliconDB client
@@ -294,7 +303,7 @@ class LiveEngine:
                                         fallback="",
                                     )
                                     if narrative:
-                                        _log_event("briefing", "", narrative)
+                                        _log_event("briefing", "", narrative, engine=self)
                                 except Exception:
                                     pass
 
@@ -332,7 +341,7 @@ class LiveEngine:
                                                 fallback="",
                                             )
                                             if narrative:
-                                                _log_event("briefing", "", narrative)
+                                                _log_event("briefing", "", narrative, engine=self)
                                     except Exception:
                                         pass
 
@@ -371,7 +380,7 @@ class LiveEngine:
                                     fallback="",
                                 )
                                 if narrative:
-                                    _log_event("briefing", "", narrative)
+                                    _log_event("briefing", "", narrative, engine=self)
                             except Exception:
                                 pass
 
@@ -498,7 +507,7 @@ class LiveEngine:
                                                 f"Explain the risk-reward rationale for this execution.",
                                                 fallback="",
                                             )
-                                            _log_event("briefing", symbol, narrative)
+                                            _log_event("briefing", symbol, narrative, engine=self)
                                         except Exception:
                                             pass
                         except Exception as exc:
@@ -551,6 +560,50 @@ class LiveEngine:
         while not self._stop_event.wait(self._interval):
             try:
                 self._supabase.push_heartbeat(self._build_heartbeat())
+
+                # Sync narratives and synthesize journal
+                if self._narratives:
+                    # Push individual narratives
+                    try:
+                        self._supabase.push_narratives(self._narratives)
+                    except Exception:
+                        pass
+
+                    # Synthesize journal summary from accumulated narratives
+                    if self._synthesizer and hasattr(self._synthesizer, '_complete'):
+                        try:
+                            narrative_text = "\n".join(
+                                f"[{n['kind'].upper()}] {n.get('symbol', '')} {n['content']}"
+                                for n in self._narratives[-10:]  # last 10
+                            )
+                            summary = self._synthesizer._complete(
+                                _FINANCE_SYSTEM,
+                                f"Summarize the following market events into a concise journal entry "
+                                f"(2-4 sentences) for the investment committee.\n\n{narrative_text}",
+                                fallback="",
+                            )
+                            if summary:
+                                _log_event("briefing", "", f"Journal: {summary}", engine=self)
+                                try:
+                                    from datetime import date
+                                    self._supabase.push_journal({
+                                        "date": str(date.today()),
+                                        "entries": {
+                                            "regime": self._current_regime or "unknown",
+                                            "narratives": self._narratives[-10:],
+                                            "summary": summary,
+                                        },
+                                        "regime_summary": summary,
+                                        "trades_executed": sum(1 for n in self._narratives if "trade" in n.get("kind", "").lower()),
+                                        "nav_change_pct": 0,
+                                    })
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
+                    self._narratives.clear()
+
             except Exception as e:
                 logger.error("Heartbeat failed: %s", e)
 

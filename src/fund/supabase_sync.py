@@ -102,3 +102,16 @@ class SupabaseSync:
                 }, on_conflict="symbol,status").execute()
         except Exception as e:
             logger.error("Failed to push signals: %s", e)
+
+    def push_narratives(self, narratives: list) -> None:
+        """Insert narrative events to Supabase."""
+        try:
+            for n in narratives:
+                self._client.table("narratives").insert({
+                    "kind": n.get("kind", "briefing"),
+                    "symbol": n.get("symbol", ""),
+                    "content": n.get("content", ""),
+                    "metadata": {},
+                }).execute()
+        except Exception as e:
+            logger.error("Failed to push narratives: %s", e)

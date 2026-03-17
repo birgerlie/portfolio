@@ -179,6 +179,19 @@ model Invite {
   @@map("invites")
 }
 
+// ── Narratives ────────────────────────────────────────────────────────────
+
+model Narrative {
+  id        String   @id @default(cuid())
+  kind      String   // thermo, contradiction, briefing, trade, regime
+  symbol    String   @default("")
+  content   String
+  metadata  Json     @default("{}")
+  createdAt DateTime @map("created_at") @default(now())
+
+  @@map("narratives")
+}
+
 // ── Signals ───────────────────────────────────────────────────────────────
 
 model Signal {
