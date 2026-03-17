@@ -25,7 +25,7 @@ export async function NavBar() {
     <nav className="fixed top-0 w-full z-50 bg-[#0a0a0a]/80 backdrop-blur-xl border-b border-white/[0.06]">
       <div className="max-w-7xl mx-auto px-6 h-12 flex items-center justify-between">
         <Link href="/" className="text-[14px] font-semibold text-[#f5f5f5] tracking-[-0.01em]">
-          Glass Box Fund
+          Rock & Grolla Trading Club
         </Link>
         <div className="flex items-center gap-0.5 text-[13px]">
           <Link href="/universe" className={linkClass}>Universe</Link>

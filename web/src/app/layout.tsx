@@ -6,8 +6,8 @@ import { NavBar } from "@/components/nav-bar";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Glass Box Fund",
-  description: "Investment Club Dashboard",
+  title: "Rock & Grolla Trading Club",
+  description: "Trading Club Dashboard",
 };
 
 export default function RootLayout({

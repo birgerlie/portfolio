@@ -31,10 +31,10 @@ export default function LoginPage() {
     <div className="min-h-screen bg-[#0a0a0a] flex items-center justify-center">
       <div className="w-full max-w-sm px-8">
         <h1 className="text-2xl font-medium tracking-tight text-[#f5f5f5] text-center mb-1">
-          Glass Box Fund
+          Rock & Grolla Trading Club
         </h1>
         <p className="text-white/40 text-center mb-12 text-[13px]">
-          Investment Club Dashboard
+          Trading Club Dashboard
         </p>
 
         {sent ? (
