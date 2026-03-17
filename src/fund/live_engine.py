@@ -221,36 +221,103 @@ class LiveEngine:
 
                         if changed:
                             self._reactor.on_thermo_shift({"temperature": temp})
-                            should_analyze = True  # Thermo shift → re-evaluate
+                            should_analyze = True
+
+                            # Synthesize thermo narrative
+                            if self._synthesizer and hasattr(self._synthesizer, '_complete'):
+                                try:
+                                    narrative = self._synthesizer._complete(
+                                        "You are a quantitative fund analyst monitoring a belief engine's thermodynamic state. "
+                                        "Write 1-2 sentences explaining what the temperature shift means for the portfolio. Be specific about what's changing.",
+                                        f"Temperature shifted from {old_tier.value} to {self._tempo.current_tier.value}.\n"
+                                        f"Temperature: {temp:.3f}, Entropy production: {entropy:.3f}, Criticality: {criticality:.3f}\n"
+                                        f"Portfolio symbols: {', '.join(self._symbols)}\n"
+                                        f"Current regime: {self._current_regime or 'unknown'}",
+                                        fallback="",
+                                    )
+                                    if narrative:
+                                        _log_event("briefing", "", narrative)
+                                except Exception:
+                                    pass
 
                 # Check for contradictions
+                contradiction_details = []
                 if hasattr(self._silicondb, 'detect_contradictions'):
                     contradictions = self._silicondb.detect_contradictions(samples=20, min_conflict_score=0.3, max_results=5)
                     if contradictions:
                         n = len(contradictions) if isinstance(contradictions, list) else 0
-                        if n > 0 and self._verbose:
-                            _log_event("belief", "", f"{n} contradictions detected")
-                        if n > 0 and self._tempo.should_analyze():
-                            self._reactor.on_significant_shift({"contradictions": n})
-                            should_analyze = True  # Contradictions → re-evaluate
+                        if n > 0:
+                            if isinstance(contradictions, list):
+                                contradiction_details = contradictions
+                            if self._verbose:
+                                _log_event("belief", "", f"{n} contradictions detected")
+                            if self._tempo.should_analyze():
+                                self._reactor.on_significant_shift({"contradictions": n})
+                                should_analyze = True
 
-                # Request epistemic briefing if warm+ and something triggered analysis
+                                # Synthesize contradiction narrative
+                                if self._synthesizer and hasattr(self._synthesizer, '_complete') and contradiction_details:
+                                    try:
+                                        contra_str = "\n".join(
+                                            f"  - {c.get('belief_a', c.get('a', '?'))} vs {c.get('belief_b', c.get('b', '?'))} "
+                                            f"(conflict={c.get('conflict_score', c.get('score', '?'))})"
+                                            for c in contradiction_details[:5]
+                                            if isinstance(c, dict)
+                                        )
+                                        if contra_str:
+                                            narrative = self._synthesizer._complete(
+                                                "You are a quantitative fund analyst. The belief engine detected contradictions "
+                                                "between market beliefs. Write 1-2 sentences explaining what these contradictions "
+                                                "mean and whether the portfolio should act. Be specific about the symbols involved.",
+                                                f"Contradictions found:\n{contra_str}\n"
+                                                f"Portfolio: {', '.join(self._symbols)}\n"
+                                                f"Current regime: {self._current_regime or 'unknown'}",
+                                                fallback="",
+                                            )
+                                            if narrative:
+                                                _log_event("briefing", "", narrative)
+                                    except Exception:
+                                        pass
+
+                # Request epistemic briefing if something triggered analysis
+                briefing = None
                 if should_analyze and hasattr(self._silicondb, 'epistemic_briefing'):
                     briefing = self._silicondb.epistemic_briefing(
                         topic="market", budget=20, anchor_ratio=0.3, hops=2, neighbor_k=5,
                     )
                     if briefing and self._verbose:
                         if isinstance(briefing, dict):
-                            anchors = len(briefing.get("anchors", []))
-                            surprises = len(briefing.get("surprises", []))
-                            conflicts = len(briefing.get("conflicts", []))
-                            gaps = len(briefing.get("gaps", []))
+                            anchors = briefing.get("anchors", [])
+                            surprises = briefing.get("surprises", [])
+                            conflicts = briefing.get("conflicts", [])
+                            gaps = briefing.get("gaps", [])
                         else:
-                            anchors = len(getattr(briefing, "anchors", []))
-                            surprises = len(getattr(briefing, "surprises", []))
-                            conflicts = len(getattr(briefing, "conflicts", []))
-                            gaps = len(getattr(briefing, "gaps", []))
-                        _log_event("briefing", "", f"anchors={anchors} surprises={surprises} conflicts={conflicts} gaps={gaps}")
+                            anchors = getattr(briefing, "anchors", [])
+                            surprises = getattr(briefing, "surprises", [])
+                            conflicts = getattr(briefing, "conflicts", [])
+                            gaps = getattr(briefing, "gaps", [])
+                        _log_event("briefing", "", f"anchors={len(anchors)} surprises={len(surprises)} conflicts={len(conflicts)} gaps={len(gaps)}")
+
+                        # Synthesize briefing narrative
+                        if self._synthesizer and hasattr(self._synthesizer, '_complete'):
+                            try:
+                                anchor_str = ", ".join(str(a) for a in anchors[:3]) if anchors else "none"
+                                surprise_str = ", ".join(str(s) for s in surprises[:3]) if surprises else "none"
+                                narrative = self._synthesizer._complete(
+                                    "You are a quantitative fund analyst. SiliconDB's epistemic briefing surfaced "
+                                    "the following insights. Write 2-3 sentences synthesizing what this means "
+                                    "for the portfolio. Focus on actionable insights.",
+                                    f"Anchors (stable high-confidence beliefs): {anchor_str}\n"
+                                    f"Surprises (unexpected beliefs): {surprise_str}\n"
+                                    f"Conflicts: {len(conflicts)}, Gaps: {len(gaps)}\n"
+                                    f"Portfolio: {', '.join(self._symbols)}\n"
+                                    f"Regime: {self._current_regime or 'unknown'}",
+                                    fallback="",
+                                )
+                                if narrative:
+                                    _log_event("briefing", "", narrative)
+                            except Exception:
+                                pass
 
                 # Drain percolator events
                 if hasattr(self._silicondb, 'event_sequence'):
