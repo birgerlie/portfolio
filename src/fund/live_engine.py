@@ -47,6 +47,25 @@ _PRETTY = {
     "high_growth": "High Growth",
     "stable": "Stable",
     "declining": "Declining",
+    # Sectors
+    "technology": "Technology",
+    "communication_services": "Communication Services",
+    "consumer_cyclical": "Consumer Discretionary",
+    "consumer_defensive": "Consumer Staples",
+    "healthcare": "Healthcare",
+    "financials": "Financials",
+    "industrials": "Industrials",
+    "energy": "Energy",
+    "utilities": "Utilities",
+    "real_estate": "Real Estate",
+    "materials": "Materials",
+    # Thermo tiers
+    "cold": "Cold",
+    "warm": "Warm",
+    "hot": "Hot",
+    "critical": "Critical",
+    # Misc
+    "unknown": "Unknown",
 }
 
 
