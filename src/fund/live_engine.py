@@ -361,6 +361,18 @@ class LiveEngine:
                                 if qty > 0:
                                     order = self._broker.submit_market_order(symbol=symbol, qty=qty, side=side)
                                     _log_event("fill", symbol, f"{side.upper()} {qty} @ ~${price:.2f} ({trade.reason})")
+
+                                    # Generate narrative for this trade
+                                    if self._synthesizer and hasattr(self._synthesizer, 'synthesize_decision'):
+                                        try:
+                                            narrative = self._synthesizer.synthesize_decision(
+                                                action={"type": side.upper(), "symbol": symbol, "quantity": str(qty), "price": str(price)},
+                                                beliefs=[],
+                                                thermo={},
+                                            )
+                                            _log_event("briefing", symbol, narrative)
+                                        except Exception:
+                                            pass
                         except Exception as exc:
                             logger.error("Trade execution failed for %s: %s", trade.symbol, exc)
 
