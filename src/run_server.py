@@ -411,9 +411,25 @@ def main():
 
     nav_history, latest_prices = fetch_real_weekly_history(HOLDINGS)
 
-    if not nav_history or not latest_prices:
+    if not nav_history:
         print("  FATAL: Could not fetch market data. Check your internet connection.")
         sys.exit(1)
+    if not latest_prices:
+        # Pre-market / weekend: fetch last daily close
+        print("  WARNING: No latest prices from weekly data, fetching daily close...")
+        import yfinance as yf
+        for sym in HOLDINGS:
+            try:
+                df = yf.download(sym, period="5d", progress=False)
+                if not df.empty:
+                    price = df["Close"].iloc[-1]
+                    latest_prices[sym] = float(price.iloc[0]) if hasattr(price, 'iloc') else float(price)
+            except Exception:
+                pass
+        if latest_prices:
+            print(f"  Got {len(latest_prices)} prices from daily close")
+        else:
+            print("  WARNING: No stock prices available — engine will use streaming data only (crypto is 24/7)")
 
     # ── Build fund engine with real prices ─────────────────────
     print("\n  Building fund engine with real prices...")

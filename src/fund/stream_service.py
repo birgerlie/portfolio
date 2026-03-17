@@ -228,26 +228,8 @@ class AlpacaStreamService:
             paper=self._alpaca_config.paper,
         )
 
-        if symbols:
-            # Subscribe trades for all symbols, quotes only for priority (portfolio+reference+macro)
-            # This halves the subscription count for tracked symbols
-            self._stock_stream.subscribe_trades(self._handle_trade, *symbols)
-            priority = sorted(set(
-                self._stream_config.portfolio_symbols +
-                self._stream_config.reference_symbols +
-                self._stream_config.macro_proxies
-            ))
-            if priority:
-                self._stock_stream.subscribe_quotes(self._handle_quote, *priority)
-            logger.info("Subscribed: %d trade streams, %d quote streams", len(symbols), len(priority))
-
-        self._trading_stream.subscribe_trade_updates(self._handle_fill)
-
-        # Crypto stream (24/7, separate websocket)
-        streams = [
-            self._stock_stream._run_forever(),
-            self._trading_stream._run_forever(),
-        ]
+        # Start crypto first (24/7, separate websocket, independent of stock stream)
+        streams = []
 
         if crypto_symbols:
             self._crypto_stream = CryptoDataStream(
@@ -257,5 +239,25 @@ class AlpacaStreamService:
             self._crypto_stream.subscribe_trades(self._handle_trade, *crypto_symbols)
             self._crypto_stream.subscribe_quotes(self._handle_quote, *crypto_symbols)
             streams.append(self._crypto_stream._run_forever())
+            logger.info("Crypto stream: %d symbols", len(crypto_symbols))
+
+        # Stock stream (may fail if connection limit exceeded — crypto continues)
+        if symbols:
+            try:
+                self._stock_stream.subscribe_trades(self._handle_trade, *symbols)
+                priority = sorted(set(
+                    self._stream_config.portfolio_symbols +
+                    self._stream_config.reference_symbols +
+                    self._stream_config.macro_proxies
+                ))
+                if priority:
+                    self._stock_stream.subscribe_quotes(self._handle_quote, *priority)
+                logger.info("Stock stream: %d trade subs, %d quote subs", len(symbols), len(priority))
+                streams.append(self._stock_stream._run_forever())
+            except Exception as exc:
+                logger.error("Stock stream subscription failed: %s — crypto continues", exc)
+
+        self._trading_stream.subscribe_trade_updates(self._handle_fill)
+        streams.append(self._trading_stream._run_forever())
 
         await asyncio.gather(*streams, return_exceptions=True)
