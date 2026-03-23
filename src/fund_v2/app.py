@@ -11,16 +11,20 @@ import fund_v2.hooks as hook_module
 from fund_v2.tools import register_tools
 
 
-def create_app(db_path: str = None, db_url: str = None, **kwargs) -> App:
-    """Create and configure the trading fund ORM app."""
+def create_app(db_path: str = None, db_url: str = None, tenant_id: int = 3, **kwargs) -> App:
+    """Create and configure the trading fund ORM app.
+
+    Args:
+        tenant_id: Multi-tenant isolation. Default 3 (Chargo=1, V1=2, V2=3).
+    """
     if db_path == ":memory:":
         from silicondb.engine.mock import MockEngine
         engine = MockEngine()
-        app = App(engine, internal_db_url="sqlite:///:memory:")
+        app = App(engine, internal_db_url="sqlite:///:memory:", tenant_id=tenant_id)
     elif db_url:
-        app = App.from_url(db_url, **kwargs)
+        app = App.from_url(db_url, tenant_id=tenant_id, **kwargs)
     else:
-        app = App.from_path(db_path or "/data/fund", dimension=384, **kwargs)
+        app = App.from_path(db_path or "/data/fund", dimension=384, tenant_id=tenant_id, **kwargs)
 
     # Register entities
     app.register(*ALL_ENTITIES)

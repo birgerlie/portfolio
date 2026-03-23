@@ -519,12 +519,14 @@ def main():
     try:
         from silicondb import SiliconDB as SiliconDBNative  # type: ignore[import]
 
+        v1_tenant_id = int(os.environ.get("V1_TENANT_ID", "2"))
         silicondb_client = SiliconDBNative(
             silicondb_db_path,
             enable_beliefs=True,
             enable_theme_discovery=True,
+            tenant_id=v1_tenant_id,
         )
-        print(f"  SiliconDB:       embedded native client (beliefs=ON, themes=ON)")
+        print(f"  SiliconDB:       embedded native client (beliefs=ON, themes=ON, tenant={v1_tenant_id})")
         print(f"  SiliconDB:       path={silicondb_db_path}")
         print(f"  SiliconDB:       thermo_state={hasattr(silicondb_client, 'thermo_state')}, "
               f"epistemic_briefing={hasattr(silicondb_client, 'epistemic_briefing')}, "

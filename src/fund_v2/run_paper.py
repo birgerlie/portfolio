@@ -124,17 +124,22 @@ def run():
 ║  Macro:        {', '.join(macro_proxies):<44}║
 ║  Total:        {len(all_symbols)} symbols{' ' * 38}║
 ║  Paper:        {str(alpaca_paper):<44}║
+║  Tenant:       {tenant_id} (Chargo=1, V1=2, V2=3){' ' * 21}║
 ╚══════════════════════════════════════════════════════════════╝
 """)
 
     # ── SiliconDB engine ─────────────────────────────────────────────
+    # Multi-tenant: Chargo=1, Fund V1=2, Fund V2=3
+    # Use shared DB path (same as V1) or separate
     import tempfile
-    db_dir = os.environ.get("V2_DB_PATH", tempfile.mkdtemp(prefix="fund_v2_paper_"))
-    print(f"SiliconDB: {db_dir}")
+    default_db = os.path.expanduser("~/.fund/silicondb")
+    db_dir = os.environ.get("SILICONDB_DB_PATH", default_db)
+    tenant_id = int(os.environ.get("V2_TENANT_ID", "3"))
+    print(f"SiliconDB: {db_dir} (tenant={tenant_id})")
 
     try:
         from silicondb.engine.native import SiliconDBNativeEngine
-        engine = SiliconDBNativeEngine(db_dir, dimension=384)
+        engine = SiliconDBNativeEngine(db_dir, dimension=384, tenant_id=tenant_id)
         engine_type = "native"
     except Exception as e:
         print(f"WARNING: Native engine unavailable ({e}), using MockEngine")
@@ -146,7 +151,7 @@ def run():
 
     # ── ORM App ──────────────────────────────────────────────────────
     from silicondb.orm import App
-    app = App(engine, internal_db_url="sqlite:///:memory:")
+    app = App(engine, internal_db_url="sqlite:///:memory:", tenant_id=tenant_id)
 
     from fund_v2.entities import ALL_ENTITIES
     app.register(*ALL_ENTITIES)
