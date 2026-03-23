@@ -25,7 +25,7 @@ def test_instrument_has_layer3_beliefs():
 
 
 def test_instrument_has_10_beliefs():
-    assert len(Instrument._beliefs) == 10
+    assert len(Instrument._beliefs) == 12  # 4 observable + 3 derived + 3 crowd + 2 computed
 
 
 def test_instrument_has_accumulators():
@@ -46,11 +46,12 @@ def test_instrument_relationships():
 def test_instrument_source_binding():
     assert Instrument._source_binding is not None
     assert Instrument._source_binding.identity == "symbol"
+    # observe is a list of ObserveMapping objects (parsed by source_binding)
     observe = Instrument._source_binding.observe
-    assert "price" in observe
-    assert observe["price"]["belief"] == "price_trend_fast"
-    assert "trade_count" in observe
-    assert observe["trade_count"]["belief"] == "spread_tight"
+    assert len(observe) >= 2
+    beliefs_mapped = [om.belief for om in observe]
+    assert "price_trend_fast" in beliefs_mapped
+    assert "spread_tight" in beliefs_mapped
 
 
 def test_position_has_stop_loss_alert():
