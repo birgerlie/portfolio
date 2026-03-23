@@ -4,8 +4,11 @@ from pathlib import Path
 
 import pytest
 
+_ROOT = Path(__file__).resolve().parents[3]
 # Ensure silicondb is importable
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib" / "silicondb" / "python"))
+sys.path.insert(0, str(_ROOT / "lib" / "silicondb" / "python"))
+# Ensure fund_v2 package is importable
+sys.path.insert(0, str(_ROOT / "src"))
 
 from silicondb.engine.mock import MockEngine
 from silicondb.orm import App
