@@ -253,3 +253,24 @@ def sentiment_surge_predicted(entity: str, prediction: dict, app: Any) -> None:
         severity="medium",
         confidence=confidence,
     )
+
+
+@on_prediction("Instrument", "relative_strength")
+def relative_strength_shift_predicted(entity: str, prediction: dict, app: Any) -> None:
+    """Alert when an instrument's relative strength is predicted to flip significantly."""
+    if not prediction.get("predicts_flip"):
+        return
+    confidence = prediction.get("confidence", 0.0)
+    if confidence < _FLIP_CONFIDENCE_MIN:
+        return
+
+    predicted = prediction.get("predicted", 0.5)
+    direction = "strengthening" if predicted >= 0.5 else "weakening"
+    app.create_action(
+        entity_type="instrument",
+        entity_id=entity,
+        action_type="crowding_risk_predicted",
+        description=f"Relative strength predicted {direction} (confidence {confidence:.0%})",
+        severity="medium",
+        confidence=confidence,
+    )

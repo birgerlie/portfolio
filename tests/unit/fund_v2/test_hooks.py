@@ -35,7 +35,7 @@ def app(mock_engine):
 # ── Test 1: collect_hooks_finds_all ──────────────────────────────────────────
 
 def test_collect_hooks_finds_all():
-    """All 14 decorated hook functions are discoverable via collect_hooks_from_module."""
+    """All 15 decorated hook functions are discoverable via collect_hooks_from_module."""
     found = collect_hooks_from_module(hooks_module)
     names = {h["callback"].__name__ for h in found}
     expected = {
@@ -53,6 +53,7 @@ def test_collect_hooks_finds_all():
         "sector_rotation_predicted",
         "regime_shift_predicted",
         "sentiment_surge_predicted",
+        "relative_strength_shift_predicted",
     }
     assert names == expected
 
