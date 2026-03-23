@@ -268,20 +268,63 @@ def run():
             # Route trade/quote events to beliefs
             if event.kind == "trade":
                 price = event.data.get("price", 0)
+                size = event.data.get("size", 0)
                 prev = price_cache.get(symbol)
                 if prev and prev.price > 0:
                     price_up = price > prev.price
-                    try:
-                        app.engine.observe(f"{ext_id}:price_trend_fast", confirmed=price_up, source="alpaca")
-                        app.engine.observe(f"{ext_id}:price_trend_slow", confirmed=price_up, source="alpaca")
-                        app.engine.observe(f"{ext_id}:spread_tight", confirmed=True, source="alpaca")
-                    except Exception:
-                        pass
+                    move_pct = abs(price - prev.price) / prev.price
 
-                    # Propagate through graph
+                    # Map beliefs based on entity type
+                    if is_macro:
+                        # MacroFactor has: elevated, trending
+                        try:
+                            app.engine.observe(f"{ext_id}:trending", confirmed=price_up, source="alpaca")
+                            app.engine.observe(f"{ext_id}:elevated", confirmed=price_up, source="alpaca")
+                        except Exception:
+                            pass
+                    else:
+                        # Instrument has: price_trend_fast, price_trend_slow, spread_tight, etc.
+                        # Multiple observations per trade — larger moves get more weight
+                        n_obs = max(1, int(move_pct * 5000))  # 0.1% move = 5 obs, 1% = 50
+                        n_obs = min(n_obs, 20)  # cap at 20 per trade
+
+                        for _ in range(n_obs):
+                            try:
+                                app.engine.observe(f"{ext_id}:price_trend_fast", confirmed=price_up, source="alpaca")
+                            except Exception:
+                                break
+
+                        # Slow trend gets fewer observations (more inertia)
+                        for _ in range(max(1, n_obs // 3)):
+                            try:
+                                app.engine.observe(f"{ext_id}:price_trend_slow", confirmed=price_up, source="alpaca")
+                            except Exception:
+                                break
+
+                        # Exhaustion: large moves in either direction
+                        try:
+                            if move_pct > 0.002:  # > 0.2% move
+                                app.engine.observe(f"{ext_id}:exhaustion", confirmed=True, source="alpaca")
+                            elif move_pct < 0.0005:  # tiny move = cooling
+                                app.engine.observe(f"{ext_id}:exhaustion", confirmed=False, source="alpaca")
+                        except Exception:
+                            pass
+
+                        # Volume/liquidity
+                        try:
+                            app.engine.observe(f"{ext_id}:spread_tight", confirmed=True, source="alpaca")
+                            app.engine.observe(f"{ext_id}:volume_normal", confirmed=(size > 0), source="alpaca")
+                        except Exception:
+                            pass
+
+                    # Propagate through graph (from ontology node, not entity ID)
                     try:
                         if hasattr(app.engine, "propagate"):
-                            app.engine.propagate(external_id=ext_id, confidence=0.5, decay=0.3)
+                            app.engine.propagate(
+                                external_id=symbol,  # ontology node for graph traversal
+                                confidence=0.3 + move_pct * 10,
+                                decay=0.4,
+                            )
                     except Exception:
                         pass
 
@@ -290,7 +333,7 @@ def run():
             elif event.kind == "quote":
                 bid = event.data.get("bid", 0)
                 ask = event.data.get("ask", 0)
-                if bid > 0 and ask > 0:
+                if bid > 0 and ask > 0 and not is_macro:
                     spread = (ask - bid) / bid
                     tight = spread < 0.005
                     try:
