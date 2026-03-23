@@ -159,48 +159,68 @@ def create_backtest_engine(db_dir: str, dimension: int = 384):
 
 
 def setup_ontology(app, symbols: List[str], macro_proxies: List[str]):
-    """Seed the knowledge graph with sector, competition, and macro relationships."""
-    triples = []
+    """Seed the knowledge graph using the real ontology from fund/ontology.py.
 
-    # Sector membership
-    sectors_seen = set()
-    for symbol in symbols:
-        sector = SYMBOL_SECTORS.get(symbol)
-        if sector:
-            triples.append({"subject": symbol, "predicate": "in_sector", "object": sector, "weight": 1.0})
-            triples.append({"subject": sector, "predicate": "contains_instrument", "object": symbol, "weight": 1.0})
-            triples.append({"subject": symbol, "predicate": "is_a", "object": "instrument", "weight": 1.0})
-            sectors_seen.add(sector)
+    Loads sector membership, competition, macro relationships, index structure,
+    market structure, and macro proxies — the full graph, not a hardcoded subset.
+    Then connects ORM entity IDs to ontology nodes so propagation flows through.
+    """
+    from fund.ontology import build_ontology, MACRO_PROXIES as ONTO_PROXIES, MACRO, COMPETITORS as ONTO_COMPETITORS
 
-    # Sector entities
-    for sector in sectors_seen:
-        triples.append({"subject": sector, "predicate": "is_a", "object": "sector", "weight": 1.0})
+    # Build the full ontology (uses_network=False to skip Wikipedia/Yahoo fetch)
+    all_triples = build_ontology(use_network=False)
+    logger.info("Built ontology: %d triples from curated data", len(all_triples))
 
-    # Competition
-    for a, b in COMPETITORS:
-        if a in symbols and b in symbols:
-            triples.append({"subject": a, "predicate": "competes_with", "object": b, "weight": 0.7})
-            triples.append({"subject": b, "predicate": "competes_with", "object": a, "weight": 0.7})
+    # Filter to symbols we're backtesting + their graph neighborhood
+    relevant_symbols = set(symbols + macro_proxies)
+    relevant_triples = []
+    for t in all_triples:
+        # Keep triple if either endpoint is a symbol we care about,
+        # or it's a structural triple (sector, macro factor, index)
+        if t.subject in relevant_symbols or t.object in relevant_symbols:
+            relevant_triples.append(t)
+        elif t.predicate in ("is_a", "pressures", "benefits", "drives", "signals",
+                              "proxy_for", "tracks", "measures_volatility_of",
+                              "derived_from", "measures"):
+            relevant_triples.append(t)
 
-    # Macro factors
-    for proxy, (factor, predicate, sector) in MACRO_PROXY_MAPPINGS.items():
-        if proxy in macro_proxies:
-            triples.append({"subject": proxy, "predicate": "proxy_for", "object": factor, "weight": 0.9})
-            triples.append({"subject": proxy, "predicate": "is_a", "object": "instrument", "weight": 1.0})
-            if predicate and sector and sector in sectors_seen:
-                triples.append({"subject": factor, "predicate": predicate, "object": sector, "weight": 0.6})
+    # Ingest as dicts
+    triple_dicts = [
+        {"subject": t.subject, "predicate": t.predicate, "object": t.object, "weight": t.weight}
+        for t in relevant_triples
+    ]
 
-    # Ingest triples
     if hasattr(app.engine, "insert_triples"):
-        app.engine.insert_triples(triples)
+        app.engine.insert_triples(triple_dicts)
     else:
-        for t in triples:
+        for t in triple_dicts:
             try:
                 app.engine.add_triple(t["subject"], t["predicate"], t["object"], weight=t.get("weight", 1.0))
             except Exception:
                 pass
 
-    logger.info("Ontology seeded: %d triples, %d sectors, %d symbols", len(triples), len(sectors_seen), len(symbols))
+    # Bridge: connect ORM entity IDs (instrument:AAPL) to ontology nodes (AAPL)
+    # so propagation from ontology reaches the belief nodes
+    bridge_triples = []
+    for symbol in symbols:
+        ext_id = f"instrument:{symbol}"
+        bridge_triples.append({"subject": ext_id, "predicate": "represents", "object": symbol, "weight": 1.0})
+        bridge_triples.append({"subject": symbol, "predicate": "represented_by", "object": ext_id, "weight": 1.0})
+    for symbol in macro_proxies:
+        ext_id = f"macrofactor:{symbol}"
+        bridge_triples.append({"subject": ext_id, "predicate": "represents", "object": symbol, "weight": 1.0})
+        bridge_triples.append({"subject": symbol, "predicate": "represented_by", "object": ext_id, "weight": 1.0})
+
+    if hasattr(app.engine, "insert_triples"):
+        app.engine.insert_triples(bridge_triples)
+    else:
+        for t in bridge_triples:
+            try:
+                app.engine.add_triple(t["subject"], t["predicate"], t["object"], weight=t.get("weight", 1.0))
+            except Exception:
+                pass
+
+    logger.info("Ontology seeded: %d relevant triples + %d bridge triples", len(relevant_triples), len(bridge_triples))
 
 
 # ── Daily replay ─────────────────────────────────────────────────────────────
@@ -330,53 +350,138 @@ def feed_daily_observations(app, data: Dict[str, StockData], day_idx: int, prev_
         except Exception:
             pass
 
-    # Derive relative_strength from peer comparison
-    _derive_relative_strength(app, data, macro_proxies)
-    # Derive pressure from macro proxies
-    _derive_pressure(app, data, macro_proxies)
+    # Graph-driven Layer 2 derivation:
+    # 1. Relative strength from sector peer comparison
+    # 2. Pressure from graph propagation (macro → sector → instrument)
+    _derive_layer2_from_graph(app, data, macro_proxies)
 
 
-def _derive_relative_strength(app, data, macro_proxies):
-    """Compute relative_strength by comparing each instrument to peers."""
-    slow_beliefs = {}
+def _derive_layer2_from_graph(app, data: Dict[str, StockData], macro_proxies: set):
+    """Derive Layer 2 beliefs using the graph, not hardcoded logic.
+
+    Relative strength: compare each instrument's price_trend_slow to
+    sector peers by querying the graph for in_sector relationships.
+
+    Pressure: propagate macro proxy observations through the ontology.
+    TLT moves → interest_rates:trending belief → engine.propagate() pushes
+    signal through graph edges → instruments connected via sector membership
+    and macro relationships get pressure updated automatically.
+    """
+    # ── Relative strength via sector peer comparison ──────────────────────
+    # Group instruments by sector using graph triples
+    sector_members: Dict[str, List[str]] = {}
     for symbol in data:
         if symbol in macro_proxies:
             continue
+        ext_id = f"instrument:{symbol}"
         try:
-            ext_id = f"instrument:{symbol}"
-            slow_beliefs[symbol] = app.engine.belief(f"{ext_id}:price_trend_slow")
-        except Exception:
-            slow_beliefs[symbol] = 0.5
-
-    if not slow_beliefs:
-        return
-    avg_slow = sum(slow_beliefs.values()) / len(slow_beliefs)
-    for symbol, slow_val in slow_beliefs.items():
-        try:
-            ext_id = f"instrument:{symbol}"
-            app.engine.observe(f"{ext_id}:relative_strength", confirmed=(slow_val > avg_slow), source="derived")
+            # Query: what sector is this instrument in?
+            triples = app.engine.query_triples(subject=symbol, predicate="in_sector")
+            for t in triples:
+                sector = t.get("object", t.get("object_value", ""))
+                if sector:
+                    sector_members.setdefault(sector, []).append(symbol)
         except Exception:
             pass
 
+    # If graph query didn't work (no triples found), fall back to all-vs-all
+    if not sector_members:
+        sector_members["all"] = [s for s in data if s not in macro_proxies]
 
-def _derive_pressure(app, data, macro_proxies):
-    """Derive pressure on instruments from macro proxy belief states."""
-    for proxy in ("TLT", "UVXY", "GLD"):
-        if proxy not in data:
+    # Compute relative strength within each sector group
+    for sector, members in sector_members.items():
+        if len(members) < 2:
             continue
+        slow_beliefs = {}
+        for symbol in members:
+            try:
+                slow_beliefs[symbol] = app.engine.belief(f"instrument:{symbol}:price_trend_slow")
+            except Exception:
+                slow_beliefs[symbol] = 0.5
+
+        avg = sum(slow_beliefs.values()) / len(slow_beliefs)
+        for symbol, val in slow_beliefs.items():
+            try:
+                app.engine.observe(
+                    f"instrument:{symbol}:relative_strength",
+                    confirmed=(val > avg),
+                    source=f"sector_peer:{sector}",
+                )
+            except Exception:
+                pass
+
+    # ── Pressure via graph propagation ────────────────────────────────────
+    # For each macro proxy, propagate its belief state through the graph.
+    # The ontology has: TLT proxy_for interest_rates, interest_rates pressures technology,
+    # technology contains_instrument AAPL — so propagating from TLT reaches AAPL
+    # through 3 hops with decaying confidence.
+    for symbol in macro_proxies:
+        if symbol not in data:
+            continue
+        ext_id = f"macrofactor:{symbol}"
         try:
-            ext_id = f"macrofactor:{proxy}"
-            proxy_trend = app.engine.belief(f"{ext_id}:elevated")
-            is_pressure = (proxy == "TLT" and proxy_trend < 0.5) or \
-                          (proxy == "UVXY" and proxy_trend > 0.5) or \
-                          (proxy == "GLD" and proxy_trend > 0.6)
-            for target in data:
-                if target not in macro_proxies:
-                    try:
-                        t_id = f"instrument:{target}"
-                        app.engine.observe(f"{t_id}:pressure", confirmed=is_pressure, source=f"macro:{proxy}")
-                    except Exception:
-                        pass
+            # Read the macro proxy's current trend belief
+            trend = app.engine.belief(f"{ext_id}:trending")
+        except Exception:
+            trend = 0.5
+
+        # Propagate from the ontology node (e.g., "TLT") with strength
+        # proportional to how far the trend deviates from neutral
+        deviation = abs(trend - 0.5)
+        if deviation > 0.05:  # only propagate if meaningful
+            try:
+                # Propagate from the raw ontology node so it flows through
+                # proxy_for → factor → pressures/drives → sector → instrument edges
+                app.engine.propagate(
+                    external_id=symbol,  # "TLT" (ontology node, not "macrofactor:TLT")
+                    confidence=0.3 + deviation,
+                    decay=0.4,
+                )
+            except Exception:
+                pass
+
+        # Also observe pressure directly on instruments connected via graph
+        # This catches what propagation might miss due to edge structure
+        try:
+            # Find what factor this proxy represents
+            proxy_triples = app.engine.query_triples(subject=symbol, predicate="proxy_for")
+            for pt in proxy_triples:
+                factor = pt.get("object", pt.get("object_value", ""))
+                if not factor:
+                    continue
+                # Find what sectors this factor pressures
+                pressure_triples = app.engine.query_triples(subject=factor, predicate="pressures")
+                benefit_triples = app.engine.query_triples(subject=factor, predicate="benefits")
+
+                for st in pressure_triples:
+                    sector = st.get("object", st.get("object_value", ""))
+                    weight = st.get("weight", st.get("probability", 0.5))
+                    # Find instruments in this sector
+                    members = sector_members.get(sector, [])
+                    for inst_sym in members:
+                        try:
+                            # Pressure increases when macro factor trend is strong
+                            app.engine.observe(
+                                f"instrument:{inst_sym}:pressure",
+                                confirmed=(trend > 0.5),  # factor rising = pressure
+                                source=f"graph:{factor}→{sector}",
+                            )
+                        except Exception:
+                            pass
+
+                for bt in benefit_triples:
+                    sector = bt.get("object", bt.get("object_value", ""))
+                    members = sector_members.get(sector, [])
+                    for inst_sym in members:
+                        try:
+                            # Benefits = inverse pressure
+                            app.engine.observe(
+                                f"instrument:{inst_sym}:pressure",
+                                confirmed=(trend < 0.5),  # factor rising = benefit (less pressure)
+                                source=f"graph:{factor}→{sector}",
+                            )
+                        except Exception:
+                            pass
         except Exception:
             pass
 
