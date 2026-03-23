@@ -205,42 +205,55 @@ def setup_ontology(app, symbols: List[str], macro_proxies: List[str]):
 
 # ── Daily replay ─────────────────────────────────────────────────────────────
 
-def _ensure_belief_nodes(app, symbols: List[str]):
-    """Ingest belief node documents so observe() has something to update.
+def _seed_instruments(app, data: Dict[str, StockData], period: dict):
+    """Ingest instruments via the ORM pipeline.
 
-    SiliconDB requires a document to exist before beliefs can be tracked.
-    Each belief is a separate node: "{symbol}:{belief_name}".
+    RouteStage auto-creates belief nodes with initial probabilities
+    and connects them with has_{belief} triples. No manual node
+    creation needed (fixed in #338).
     """
-    belief_names = ["price_trend_fast", "price_trend_slow", "relative_strength",
-                    "exhaustion", "pressure", "spread_tight", "volume_normal",
-                    "retail_sentiment", "crowded", "return"]
-    for symbol in symbols:
-        # Ingest the instrument document
-        try:
-            app.engine.ingest(symbol, f"Instrument {symbol}", metadata={"node_type": "instrument", "symbol": symbol})
-        except Exception:
-            pass
-        # Ingest each belief node
-        for belief in belief_names:
-            node_id = f"{symbol}:{belief}"
-            try:
-                app.engine.ingest(node_id, f"{belief} for {symbol}", metadata={"node_type": belief, "symbol": symbol})
-            except Exception:
-                pass
-        # Connect belief nodes to instrument via triples
-        for belief in belief_names:
-            try:
-                app.engine.add_triple(symbol, f"has_{belief}", f"{symbol}:{belief}", weight=1.0)
-            except Exception:
-                pass
+    from fund_v2.entities import Instrument, MacroFactor
+    from silicondb.sources.models import SourceRecord
+    from silicondb.pipeline.models import PipelineContext
+    from datetime import datetime, timezone
+
+    pipeline = app.get_pipeline()
+
+    for symbol in data:
+        is_macro = symbol in period.get("macro_proxies", [])
+        entity_cls = MacroFactor if is_macro else Instrument
+
+        record = SourceRecord(
+            source_name="backtest",
+            collection="instruments",
+            identity=symbol,
+            data={"symbol": symbol, "price": data[symbol].closes[0], "trade_count": 1},
+            timestamp=datetime.now(timezone.utc),
+            idempotency_key=f"seed:{symbol}",
+            tenant_id=0,
+        )
+        ctx = PipelineContext(
+            engine=app.engine,
+            entity_cls=entity_cls,
+            tenant_id=0,
+        )
+        pipeline.process(record, ctx)
+
+    logger.info("Seeded %d instruments via pipeline (belief nodes auto-created)", len(data))
 
 
-def feed_daily_observations(app, data: Dict[str, StockData], day_idx: int, prev_day_idx: int):
-    """Feed one day's worth of observations into SiliconDB.
+def feed_daily_observations(app, data: Dict[str, StockData], day_idx: int, prev_day_idx: int, period: dict):
+    """Feed one day's observations directly into SiliconDB belief nodes.
 
-    For each symbol: observe price movement → belief updates.
-    Multiple observations per day to build conviction (Bayesian updates accumulate).
+    Seeding (via _seed_instruments) creates entities + belief nodes through
+    the pipeline. Daily updates go directly to engine.observe() since the
+    pipeline's ingest rejects duplicate external_ids.
+
+    Observation strength scales with move magnitude to simulate intraday
+    trade density — a 3% move generates more observations than a 0.1% move.
     """
+    macro_proxies = set(period.get("macro_proxies", []))
+
     for symbol, sd in data.items():
         if day_idx >= len(sd.closes) or prev_day_idx >= len(sd.closes):
             continue
@@ -254,99 +267,134 @@ def feed_daily_observations(app, data: Dict[str, StockData], day_idx: int, prev_
 
         daily_return = (close - prev_close) / prev_close
         price_up = daily_return > 0
+        is_macro = symbol in macro_proxies
+        prefix = "macrofactor" if is_macro else "instrument"
+        ext_id = f"{prefix}:{symbol}"
 
-        # Observe price direction — both confirmed AND disconfirmed
-        # so beliefs converge toward the actual trend rather than saturating
-        strength = min(5, max(1, int(abs(daily_return) * 500)))
+        # Observation strength scales with move magnitude
+        strength = min(10, max(1, int(abs(daily_return) * 1000)))
 
+        # Price trend fast (responsive — full strength)
         for _ in range(strength):
             try:
-                # Price up → confirm trend_fast, disconfirm if down
-                app.engine.observe(f"{symbol}:price_trend_fast", confirmed=price_up, source="backtest")
+                app.engine.observe(f"{ext_id}:price_trend_fast", confirmed=price_up, source="backtest")
             except Exception:
                 pass
 
+        # Price trend slow (inertia — half strength)
         for _ in range(max(1, strength // 2)):
             try:
-                app.engine.observe(f"{symbol}:price_trend_slow", confirmed=price_up, source="backtest")
+                app.engine.observe(f"{ext_id}:price_trend_slow", confirmed=price_up, source="backtest")
             except Exception:
                 pass
 
-        # Exhaustion: observe when trend is extreme in EITHER direction
-        if abs(daily_return) > 0.02:
-            try:
-                app.engine.observe(f"{symbol}:exhaustion", confirmed=True, source="backtest")
-            except Exception:
-                pass
-        else:
-            try:
-                app.engine.observe(f"{symbol}:exhaustion", confirmed=False, source="backtest")
-            except Exception:
-                pass
-
-        # Volume normality
+        # Exhaustion: extreme moves in either direction
         try:
-            app.engine.observe(f"{symbol}:volume_normal", confirmed=(volume > 0), source="backtest")
-            app.engine.observe(f"{symbol}:spread_tight", confirmed=True, source="backtest")
+            if abs(daily_return) > 0.02:
+                app.engine.observe(f"{ext_id}:exhaustion", confirmed=True, source="backtest")
+            else:
+                app.engine.observe(f"{ext_id}:exhaustion", confirmed=False, source="backtest")
         except Exception:
             pass
 
-        # Propagate through graph
+        # Volume and spread
+        try:
+            app.engine.observe(f"{ext_id}:volume_normal", confirmed=(volume > 0), source="backtest")
+            app.engine.observe(f"{ext_id}:spread_tight", confirmed=True, source="backtest")
+        except Exception:
+            pass
+
+        # Graph propagation
         try:
             if hasattr(app.engine, "propagate"):
-                app.engine.propagate(external_id=f"{symbol}:return", confidence=0.5 + abs(daily_return) * 5, decay=0.3)
+                app.engine.propagate(
+                    external_id=ext_id,
+                    confidence=0.5 + abs(daily_return) * 5,
+                    decay=0.3,
+                )
         except Exception:
             pass
 
-    # Compute relative_strength directly (hooks can't query peers from native engine)
+    # Macro-specific observations
+    for symbol in macro_proxies:
+        if symbol not in data:
+            continue
+        try:
+            ext_id = f"macrofactor:{symbol}"
+            # Macro "elevated" belief tracks whether the factor is above normal
+            sd = data[symbol]
+            if day_idx < len(sd.closes) and prev_day_idx < len(sd.closes):
+                ret = (sd.closes[day_idx] - sd.closes[prev_day_idx]) / sd.closes[prev_day_idx]
+                app.engine.observe(f"{ext_id}:elevated", confirmed=(ret > 0), source="backtest")
+                app.engine.observe(f"{ext_id}:trending", confirmed=(ret > 0), source="backtest")
+        except Exception:
+            pass
+
+    # Derive relative_strength from peer comparison
+    _derive_relative_strength(app, data, macro_proxies)
+    # Derive pressure from macro proxies
+    _derive_pressure(app, data, macro_proxies)
+
+
+def _derive_relative_strength(app, data, macro_proxies):
+    """Compute relative_strength by comparing each instrument to peers."""
     slow_beliefs = {}
     for symbol in data:
+        if symbol in macro_proxies:
+            continue
         try:
-            slow_beliefs[symbol] = app.engine.belief(f"{symbol}:price_trend_slow")
+            ext_id = f"instrument:{symbol}"
+            slow_beliefs[symbol] = app.engine.belief(f"{ext_id}:price_trend_slow")
         except Exception:
             slow_beliefs[symbol] = 0.5
 
-    if slow_beliefs:
-        avg_slow = sum(slow_beliefs.values()) / len(slow_beliefs)
-        for symbol, slow_val in slow_beliefs.items():
-            rs_up = slow_val > avg_slow
-            try:
-                app.engine.observe(f"{symbol}:relative_strength", confirmed=rs_up, source="derived")
-            except Exception:
-                pass
-
-    # Compute pressure from macro proxies
-    for symbol in data:
-        if symbol in ("TLT", "UVXY", "GLD"):
-            try:
-                proxy_trend = app.engine.belief(f"{symbol}:price_trend_fast")
-                # TLT falling = rates rising = pressure on tech
-                # UVXY rising = fear = pressure on everything
-                is_pressure = (symbol == "TLT" and proxy_trend < 0.5) or \
-                              (symbol == "UVXY" and proxy_trend > 0.5) or \
-                              (symbol == "GLD" and proxy_trend > 0.6)
-                if is_pressure:
-                    for target in data:
-                        if target not in ("TLT", "UVXY", "GLD", "USO", "UUP", "IWM"):
-                            try:
-                                app.engine.observe(f"{target}:pressure", confirmed=True, source=f"macro:{symbol}")
-                            except Exception:
-                                pass
-            except Exception:
-                pass
+    if not slow_beliefs:
+        return
+    avg_slow = sum(slow_beliefs.values()) / len(slow_beliefs)
+    for symbol, slow_val in slow_beliefs.items():
+        try:
+            ext_id = f"instrument:{symbol}"
+            app.engine.observe(f"{ext_id}:relative_strength", confirmed=(slow_val > avg_slow), source="derived")
+        except Exception:
+            pass
 
 
-def collect_daily_state(app, symbols: List[str]) -> Dict[str, Dict[str, float]]:
+def _derive_pressure(app, data, macro_proxies):
+    """Derive pressure on instruments from macro proxy belief states."""
+    for proxy in ("TLT", "UVXY", "GLD"):
+        if proxy not in data:
+            continue
+        try:
+            ext_id = f"macrofactor:{proxy}"
+            proxy_trend = app.engine.belief(f"{ext_id}:elevated")
+            is_pressure = (proxy == "TLT" and proxy_trend < 0.5) or \
+                          (proxy == "UVXY" and proxy_trend > 0.5) or \
+                          (proxy == "GLD" and proxy_trend > 0.6)
+            for target in data:
+                if target not in macro_proxies:
+                    try:
+                        t_id = f"instrument:{target}"
+                        app.engine.observe(f"{t_id}:pressure", confirmed=is_pressure, source=f"macro:{proxy}")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+
+def collect_daily_state(app, symbols: List[str], macro_proxies: List[str]) -> Dict[str, Dict[str, float]]:
     """Read current belief state for all symbols."""
     beliefs = {}
     belief_names = ["price_trend_fast", "price_trend_slow", "relative_strength",
                     "exhaustion", "pressure", "spread_tight", "volume_normal"]
 
     for symbol in symbols:
+        is_macro = symbol in macro_proxies
+        prefix = "macrofactor" if is_macro else "instrument"
+        ext_id = f"{prefix}:{symbol}"
         b = {}
         for name in belief_names:
             try:
-                b[name] = app.engine.belief(f"{symbol}:{name}")
+                b[name] = app.engine.belief(f"{ext_id}:{name}")
             except Exception:
                 b[name] = 0.5
         beliefs[symbol] = b
@@ -366,16 +414,18 @@ def run_daily_signals(app, symbols: List[str], macro_proxies: List[str]) -> List
             "risk_on": 0.5,
         })()
 
-        # Read beliefs directly for each instrument
+        # Read beliefs directly for each instrument (using pipeline entity ID format)
         instruments = []
         for symbol in symbols:
             if symbol in macro_proxies:
                 continue
-            inst = type("Inst", (), {"external_id": symbol, "symbol": symbol})()
+            ext_id = f"instrument:{symbol}"
+            inst = type("Inst", (), {"external_id": ext_id, "symbol": symbol})()
             for attr in ["relative_strength", "exhaustion", "pressure",
-                         "retail_sentiment", "crowded", "price_trend_fast", "price_trend_slow"]:
+                         "retail_sentiment", "crowded", "price_trend_fast", "price_trend_slow",
+                         "entry_ready", "exit_ready"]:
                 try:
-                    val = app.engine.belief(f"{symbol}:{attr}")
+                    val = app.engine.belief(f"{ext_id}:{attr}")
                 except Exception:
                     val = 0.5
                 setattr(inst, attr, val)
@@ -439,14 +489,21 @@ def run_backtest(period_name: str, compare_v1: bool = False) -> BacktestResult:
                 callback=hook["callback"],
             )
 
+        # Use a pipeline without dedup for backtest (same entity ingested repeatedly)
+        from silicondb.pipeline import Pipeline
+        from silicondb.pipeline.validate import ValidateStage
+        from silicondb.pipeline.normalise import NormaliseStage
+        from silicondb.pipeline.route import RouteStage
+        app._pipeline = Pipeline([ValidateStage(), NormaliseStage(), RouteStage()])
+
         print(f"Engine: {engine_type}")
         print(f"Entities registered: {len(ALL_ENTITIES)}")
 
         # Seed ontology
         setup_ontology(app, period["symbols"], period["macro_proxies"])
 
-        # Create belief node documents so observations have targets
-        _ensure_belief_nodes(app, list(data.keys()))
+        # Seed instruments via pipeline — RouteStage auto-creates belief nodes (#338)
+        _seed_instruments(app, data, period)
 
         # Get reference symbol for dates
         ref_symbol = "SPY" if "SPY" in data else list(data.keys())[0]
@@ -462,10 +519,10 @@ def run_backtest(period_name: str, compare_v1: bool = False) -> BacktestResult:
             today = data[ref_symbol].dates[day_idx]
 
             # Feed observations
-            feed_daily_observations(app, data, day_idx, day_idx - 1)
+            feed_daily_observations(app, data, day_idx, day_idx - 1, period)
 
             # Collect state
-            beliefs = collect_daily_state(app, period["symbols"])
+            beliefs = collect_daily_state(app, period["symbols"], period.get("macro_proxies", []))
 
             # Run signals
             signals = run_daily_signals(app, period["symbols"], period["macro_proxies"])

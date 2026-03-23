@@ -29,15 +29,29 @@ class Instrument(Entity):
     spread_tight = Belief(initial=0.7)              # bid-ask spread health
     volume_normal = Belief(initial=0.6)             # volume within normal range
 
-    # Layer 2 — graph-derived / propagated
-    relative_strength = Belief(initial=0.5, computed=True)
-    exhaustion = Belief(initial=0.2, computed=True)  # buying/selling exhaustion
-    pressure = Belief(initial=0.5, computed=True)    # net order pressure
+    # Layer 2 — graph-derived (learned from observation hooks, not from Source)
+    relative_strength = Belief(initial=0.5, learned=True)
+    exhaustion = Belief(initial=0.2, learned=True)   # buying/selling exhaustion
+    pressure = Belief(initial=0.5, learned=True)     # net macro/sector pressure
 
     # Layer 3 — crowd signals
     retail_sentiment = Belief(initial=0.5)
     mention_velocity = Belief(initial=0.2)
     crowded = Belief(initial=0.3)
+
+    # Computed beliefs — auto-recompute when dependencies change
+    entry_ready = Belief(
+        computed=True,
+        depends_on=["relative_strength", "exhaustion", "pressure", "crowded"],
+        combine="weighted_mean",
+        weights={"relative_strength": 0.4, "exhaustion": -0.3, "pressure": 0.2, "crowded": -0.1},
+    )
+    exit_ready = Belief(
+        computed=True,
+        depends_on=["exhaustion", "crowded", "pressure"],
+        combine="weighted_mean",
+        weights={"exhaustion": 0.5, "crowded": 0.3, "pressure": -0.2},
+    )
 
     # Accumulators
     trade_pressure = Accumulator(preset="beliefChanges")
@@ -68,8 +82,6 @@ class Instrument(Entity):
         }
 
 
-# Patch _source_binding.observe to remain a dict (tests access it dict-style)
-Instrument._source_binding.observe = Instrument._source_cls.observe  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +122,6 @@ class Index(Entity):
         }
 
 
-Index._source_binding.observe = Index._source_cls.observe  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +162,7 @@ class MarketRegime(Entity):
 class Position(Entity):
     profitable = Belief(initial=0.5)
     within_risk_limits = Belief(initial=0.8)
-    relative_strength = Belief(initial=0.5, computed=True)  # mirrored from Instrument for alert trigger
+    relative_strength = Belief(initial=0.5, learned=True)  # mirrored from Instrument for alert trigger
 
     stop_loss = Alert(
         trigger="relative_strength",
@@ -180,7 +191,6 @@ class Position(Entity):
         }
 
 
-Position._source_binding.observe = Position._source_cls.observe  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +218,6 @@ class Portfolio(Entity):
         }
 
 
-Portfolio._source_binding.observe = Portfolio._source_cls.observe  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
