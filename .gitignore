@@ -25,3 +25,6 @@ Thumbs.db
 
 # Superpowers brainstorming
 .superpowers/
+
+# Claude worktrees
+.claude/worktrees/
