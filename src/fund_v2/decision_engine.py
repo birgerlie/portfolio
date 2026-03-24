@@ -151,9 +151,10 @@ def read_system_state(engine: Any) -> SystemState:
     return state
 
 
-# (#3) Previous state for reversal + change detection
-_prev_fe: Dict[str, Dict[str, float]] = {}  # symbol → {belief_name: prev_fe}
-_prev_actions: Dict[str, str] = {}  # symbol → previous action
+# State tracking across cycles
+_prev_fe: Dict[str, Dict[str, float]] = {}     # symbol → {belief_name: prev_fe}
+_prev_beliefs: Dict[str, Dict[str, float]] = {} # symbol → {belief_name: prev_value}
+_prev_actions: Dict[str, dict] = {}              # symbol → {action, count}
 
 
 def compute_energy_gaps(
@@ -200,7 +201,9 @@ def compute_energy_gaps(
                 pass
 
         prev_symbol_fe = _prev_fe.get(symbol, {})
+        prev_symbol_beliefs = _prev_beliefs.get(symbol, {})
         curr_symbol_fe = {}
+        curr_symbol_beliefs = {}
 
         for belief_name, goal in BELIEF_GOALS.items():
             try:
@@ -208,28 +211,57 @@ def compute_energy_gaps(
             except Exception:
                 continue
 
+            curr_symbol_beliefs[belief_name] = current
             gap = current - goal
             fe = abs(gap)
             curr_symbol_fe[belief_name] = fe
 
+            # Belief momentum: is the belief moving toward or away from goal?
+            prev_belief = prev_symbol_beliefs.get(belief_name)
+            if prev_belief is not None:
+                prev_gap = abs(prev_belief - goal)
+                belief_improving = fe < prev_gap  # gap shrinking = improving
+                # Boost FE for worsening beliefs (urgent), reduce for improving (less urgent)
+                if not belief_improving and fe > 0.1:
+                    fe *= 1.2  # worsening → more urgent
+                elif belief_improving and fe > 0.1:
+                    fe *= 0.8  # improving → less urgent
+
             if fe < min_free_energy:
-                # (#3) Reversal detection: FE was high, now dropping back toward goal
+                # Reversal detection: FE was high, now shrinking back toward goal
                 prev = prev_symbol_fe.get(belief_name, 0)
-                if prev > 0.15 and fe < prev * 0.7:  # FE dropped 30%+ from previous
-                    # Gap is shrinking — mean reversion in progress
-                    reversal_action = "buy" if gap < 0 else "sell"  # opposite of the gap direction
-                    gaps.append(EnergyGap(
-                        symbol=symbol,
-                        belief_name=belief_name,
-                        current=round(current, 4),
-                        goal=goal,
-                        free_energy=round(prev - fe + node_fe * 0.1, 4),  # reversal strength
-                        velocity=round(node_vel, 4),
-                        phase=node_phase,
-                        direction="reversal",
-                        action=reversal_action,
-                    ))
+                if prev > 0.10 and fe < prev * 0.8:  # FE dropped 20%+ from previous
+                    reversal_action = "buy" if gap < 0 else "sell"
+                    reversal_fe = prev - fe + node_fe * 0.1
+                    if reversal_fe > min_free_energy:
+                        gaps.append(EnergyGap(
+                            symbol=symbol,
+                            belief_name=belief_name,
+                            current=round(current, 4),
+                            goal=goal,
+                            free_energy=round(reversal_fe, 4),
+                            velocity=round(node_vel, 4),
+                            phase=node_phase,
+                            direction="reversal",
+                            action=reversal_action,
+                        ))
                 continue
+
+            # Also detect reversals ABOVE min_free_energy when FE is dropping fast
+            prev = prev_symbol_fe.get(belief_name, 0)
+            if prev > fe * 1.15 and prev > 0.15:  # FE shrinking while still above threshold
+                reversal_action = "buy" if gap < 0 else "sell"
+                gaps.append(EnergyGap(
+                    symbol=symbol,
+                    belief_name=belief_name,
+                    current=round(current, 4),
+                    goal=goal,
+                    free_energy=round((prev - fe) * 0.5, 4),  # half the delta as reversal strength
+                    velocity=round(node_vel, 4),
+                    phase=node_phase,
+                    direction="reversal",
+                    action=reversal_action,
+                ))
 
             direction = "above_goal" if gap > 0 else "below_goal"
             action = GAP_ACTIONS.get((belief_name, direction), "watch")
@@ -256,6 +288,7 @@ def compute_energy_gaps(
             ))
 
         _prev_fe[symbol] = curr_symbol_fe
+        _prev_beliefs[symbol] = curr_symbol_beliefs
 
     gaps.sort(key=lambda g: g.free_energy, reverse=True)
     return gaps
@@ -369,11 +402,17 @@ def _compute_sizes(
             elif abs(g.velocity) > 0.005:
                 size *= 0.5  # velocity opposes → reduce 50%
 
-        # (#3) Stale signal detection: if same action as last cycle, reduce
-        prev_action = _prev_actions.get(g.symbol)
-        if prev_action == g.action:
-            size *= 0.7  # 30% reduction for unchanged signal
-        _prev_actions[g.symbol] = g.action
+        # (#3) Stale signal decay: exponential — same action repeated = less informative
+        # After 5 identical cycles: 0.5^5 = 3% of original → effectively zero
+        prev_action = _prev_actions.get(g.symbol, {})
+        prev_act = prev_action.get("action")
+        prev_count = prev_action.get("count", 0)
+        if prev_act == g.action:
+            stale_count = prev_count + 1
+            size *= 0.5 ** min(stale_count, 5)  # halve each cycle, cap at 5
+        else:
+            stale_count = 0  # action changed — reset
+        _prev_actions[g.symbol] = {"action": g.action, "count": stale_count}
 
         if size < 0.005:
             size = 0.0
