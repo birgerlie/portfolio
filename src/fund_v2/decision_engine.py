@@ -80,17 +80,46 @@ class Decision:
     focus_count: int = 0              # how many instruments are hotspots
 
 
+def _get_native_handle(engine: Any) -> Any:
+    """Get the low-level SiliconDBNative handle that has thermo methods.
+
+    The ORM engine chain: App.engine → SiliconDBNativeEngine → _db (SiliconDBNative)
+    Thermo methods live on SiliconDBNative, not on the ORM adapter.
+    """
+    # Direct native handle
+    if hasattr(engine, "init_thermo"):
+        return engine
+    # ORM NativeEngine wraps _db
+    if hasattr(engine, "_db") and hasattr(engine._db, "init_thermo"):
+        return engine._db
+    # High-level SiliconDB wraps _db
+    db = getattr(engine, "_db", None)
+    if db and hasattr(db, "init_thermo"):
+        return db
+    return None
+
+
 def read_system_state(engine: Any) -> SystemState:
     """Read system-level thermodynamic state."""
     state = SystemState()
+    native = _get_native_handle(engine)
+    if native is None:
+        # Try engine directly (might have thermo_state from mixin)
+        native = engine
     try:
-        thermo = engine.thermo_state()
+        thermo = native.thermo_state()
         if thermo:
-            state.temperature = getattr(thermo, "temperature", 0.0)
-            state.entropy = getattr(thermo, "entropy_production", 0.0)
-            state.criticality = getattr(thermo, "criticality", 0.0)
-            tier = getattr(thermo, "criticality_tier", None)
-            state.criticality_tier = tier.value if hasattr(tier, "value") else str(tier or "normal")
+            if isinstance(thermo, dict):
+                state.temperature = thermo.get("temperature", 0.0)
+                state.entropy = thermo.get("entropy_production", 0.0)
+                state.criticality = thermo.get("criticality", 0.0)
+                state.criticality_tier = thermo.get("criticality_tier", "normal")
+            else:
+                state.temperature = getattr(thermo, "temperature", 0.0)
+                state.entropy = getattr(thermo, "entropy_production", 0.0)
+                state.criticality = getattr(thermo, "criticality", 0.0)
+                tier = getattr(thermo, "criticality_tier", None)
+                state.criticality_tier = tier.value if hasattr(tier, "value") else str(tier or "normal")
     except Exception:
         pass
     return state
@@ -108,9 +137,14 @@ def read_instrument_state(engine: Any, symbol: str, ext_id: str) -> InstrumentSt
         except Exception:
             pass
 
-    # Read thermo
+    # Read thermo — need native handle and internal doc_id
     try:
-        node_thermo = engine.node_thermo(ext_id)
+        native = _get_native_handle(engine) or engine
+        # node_thermo takes an integer doc_id, not a string external_id
+        # Try to get the doc to find its internal ID
+        doc = engine.get(ext_id)
+        doc_id = doc.get("doc_id", 0) if isinstance(doc, dict) and doc else 0
+        node_thermo = native.node_thermo(doc_id) if doc_id else None
         if node_thermo:
             state.free_energy = getattr(node_thermo, "free_energy", 0.0)
             state.velocity = getattr(node_thermo, "velocity", 0.0)
@@ -143,6 +177,14 @@ def generate_decision(
     """
     macro_proxies = macro_proxies or set()
     cost_per_symbol = cost_per_symbol or {}
+
+    # ── Run thermo pass before reading state ────────────────────────
+    try:
+        native = _get_native_handle(engine)
+        if native and hasattr(native, 'run_thermo_pass'):
+            native.run_thermo_pass()
+    except Exception:
+        pass
 
     # ── System state ─────────────────────────────────────────────────
     system = read_system_state(engine)

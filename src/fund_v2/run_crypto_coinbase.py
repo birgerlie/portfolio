@@ -144,6 +144,18 @@ def run():
             pass
     print(f"Ontology: {len(_CRYPTO_ONTOLOGY)} triples (sectors + competition + BTC dominance)")
 
+    # Initialize thermodynamic compute
+    from fund_v2.decision_engine import _get_native_handle
+    native = _get_native_handle(engine)
+    if native and hasattr(native, 'init_thermo'):
+        try:
+            native.init_thermo(max_nodes=10000)
+            print("Thermo: initialized (max_nodes=10000)")
+        except Exception as e:
+            print(f"Thermo: init failed ({e})")
+    else:
+        print("Thermo: not available on this engine")
+
     # Coinbase WebSocket
     from fund_v2.sources.coinbase_ws import CoinbaseWebSocket
     event_queue = queue.Queue(maxsize=50000)
