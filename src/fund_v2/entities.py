@@ -4,9 +4,14 @@ Belief layers:
   Layer 1 — Observable: directly measured from market data streams
   Layer 2 — Graph-derived: computed from relationships and propagation
   Layer 3 — Crowd: inferred from sentiment and social signals
+  Computed — derived from other beliefs, auto-recomputes on change
+
+Temporal partitions:
+  market_session — pre_market / morning / afternoon / after_hours
+  day_of_week — monday-sunday, aggregates to weekday/weekend
 """
 
-from silicondb.orm import Entity
+from silicondb.orm import Entity, Field
 from silicondb.orm.descriptors import (
     Belief,
     Relationship,
@@ -17,29 +22,37 @@ from silicondb.orm.descriptors import (
 
 # ---------------------------------------------------------------------------
 # Instrument — the primary trading entity
-# Layer 1: 4 observable beliefs (price, spread, volume)
-# Layer 2: 3 graph-derived beliefs (relative strength, exhaustion, pressure)
-# Layer 3: 3 crowd beliefs (retail sentiment, mention velocity, crowded)
 # ---------------------------------------------------------------------------
 
 class Instrument(Entity):
-    # Layer 1 — observable from market data
-    price_trend_fast = Belief(initial=0.5)          # short-term price momentum
-    price_trend_slow = Belief(initial=0.5)          # long-term price momentum
-    spread_tight = Belief(initial=0.7)              # bid-ask spread health
-    volume_normal = Belief(initial=0.6)             # volume within normal range
+    # Fields — stored as metadata + graph triples
+    symbol = Field(str, required=True)
+    name = Field(str)
+    sector_name = Field(str, confidence=0.9)    # inferred from Yahoo Finance
+    industry_name = Field(str, confidence=0.8)  # inferred from Yahoo Finance
 
-    # Layer 2 — graph-derived (learned from observation hooks, not from Source)
-    relative_strength = Belief(initial=0.5, learned=True)
-    exhaustion = Belief(initial=0.2, learned=True)   # buying/selling exhaustion
-    pressure = Belief(initial=0.5, learned=True)     # net macro/sector pressure
+    # Temporal: beliefs tracked per market session and day of week
+    class Temporal:
+        time_partitions = ["market_session", "day_of_week"]
+        timestamp_field = "trade_timestamp"
+
+    # Layer 1 — observable from market data
+    price_trend_fast = Belief(initial=0.5)      # 15-min momentum
+    price_trend_slow = Belief(initial=0.5)      # 5-day momentum
+    spread_tight = Belief(initial=0.7)          # bid-ask spread health
+    volume_normal = Belief(initial=0.6)         # volume within normal range
+
+    # Layer 2 — graph-derived (learned from observation hooks)
+    relative_strength = Belief(initial=0.5, learned=True)   # vs sector peers
+    exhaustion = Belief(initial=0.2, learned=True)          # mean-reversion risk
+    pressure = Belief(initial=0.5, learned=True)            # net macro/sector pressure
 
     # Layer 3 — crowd signals
     retail_sentiment = Belief(initial=0.5)
     mention_velocity = Belief(initial=0.2)
     crowded = Belief(initial=0.3)
 
-    # Computed beliefs — auto-recompute when dependencies change
+    # Computed — auto-recompute when dependencies change
     entry_ready = Belief(
         computed=True,
         depends_on=["relative_strength", "exhaustion", "pressure", "crowded"],
@@ -56,13 +69,41 @@ class Instrument(Entity):
     # Accumulators
     trade_pressure = Accumulator(preset="beliefChanges")
 
-    # Alerts
+    # Alerts — current mode
     volatility_spike = Alert(
         trigger="volume_normal",
         threshold=0.2,
         above=False,
         severity="high",
         cooldown=300,
+    )
+
+    # Alerts — predicted mode (replaces @on_prediction hooks)
+    predicted_strength_decline = Alert(
+        trigger="relative_strength",
+        threshold=0.3,
+        mode="predicted",
+        horizon_days=7,
+        severity="high",
+        cooldown=3600,
+    )
+    predicted_exhaustion = Alert(
+        trigger="exhaustion",
+        threshold=0.8,
+        above=True,
+        mode="predicted",
+        horizon_days=5,
+        severity="medium",
+        cooldown=1800,
+    )
+    predicted_crowding = Alert(
+        trigger="crowded",
+        threshold=0.8,
+        above=True,
+        mode="predicted",
+        horizon_days=7,
+        severity="medium",
+        cooldown=3600,
     )
 
     # Relationships
@@ -76,23 +117,38 @@ class Instrument(Entity):
         origin = "alpaca.stream"
         sync = "stream"
         identity = "symbol"
+        fields = {"symbol": "symbol"}
         observe = {
             "price": {"belief": "price_trend_fast", "true_strengthens": True},
             "trade_count": {"belief": "spread_tight", "true_strengthens": True},
         }
 
 
-
-
 # ---------------------------------------------------------------------------
-# Sector — industry grouping
+# Sector — GICS sector grouping
 # ---------------------------------------------------------------------------
 
 class Sector(Entity):
-    momentum = Belief(initial=0.5)
-    breadth = Belief(initial=0.5)
+    sector_id = Field(str, required=True)
+    name = Field(str)
+
+    momentum = Belief(initial=0.5)          # sector-level momentum
+    breadth = Belief(initial=0.5)           # how many components are rising
+    rotating_in = Belief(initial=0.5)       # capital flow direction
+
+    # Predicted sector rotation alert
+    predicted_rotation_out = Alert(
+        trigger="rotating_in",
+        threshold=0.3,
+        mode="predicted",
+        horizon_days=7,
+        severity="high",
+        cooldown=7200,
+    )
 
     instruments = Relationship("Instrument", many=True, inverse="in_sector")
+    pressured_by = Relationship("MacroFactor", many=True)
+    driven_by = Relationship("MacroFactor", many=True)
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +156,9 @@ class Sector(Entity):
 # ---------------------------------------------------------------------------
 
 class Industry(Entity):
+    industry_id = Field(str, required=True)
+    name = Field(str)
+
     in_sector = Relationship("Sector")
     instruments = Relationship("Instrument", many=True)
 
@@ -109,6 +168,9 @@ class Industry(Entity):
 # ---------------------------------------------------------------------------
 
 class Index(Entity):
+    symbol = Field(str, required=True)
+    name = Field(str)
+
     trend = Belief(initial=0.5)
 
     components = Relationship("Instrument", many=True)
@@ -117,21 +179,24 @@ class Index(Entity):
         origin = "alpaca.bars"
         sync = "stream"
         identity = "symbol"
+        fields = {"symbol": "symbol"}
         observe = {
             "price": {"belief": "trend", "true_strengthens": True},
         }
 
 
-
-
 # ---------------------------------------------------------------------------
-# MacroFactor — macro regime drivers (e.g. interest rates, inflation)
+# MacroFactor — macro regime drivers (interest rates, oil, fear, etc.)
 # ---------------------------------------------------------------------------
 
 class MacroFactor(Entity):
+    factor_id = Field(str, required=True)
+    name = Field(str)
+
     elevated = Belief(initial=0.4)
     trending = Belief(initial=0.5)
 
+    # Current alert
     macro_shift = Alert(
         trigger="elevated",
         threshold=0.7,
@@ -139,10 +204,21 @@ class MacroFactor(Entity):
         severity="high",
         cooldown=3600,
     )
+    # Predicted alert — early warning
+    predicted_macro_shift = Alert(
+        trigger="elevated",
+        threshold=0.7,
+        above=True,
+        mode="predicted",
+        horizon_days=7,
+        severity="critical",
+        cooldown=7200,
+    )
 
     affects_sector = Relationship("Sector", many=True)
     affects_instrument = Relationship("Instrument", many=True)
     correlated_with = Relationship("MacroFactor", many=True)
+    proxy = Relationship("Instrument")  # e.g. TLT proxies interest_rates
 
 
 # ---------------------------------------------------------------------------
@@ -150,9 +226,26 @@ class MacroFactor(Entity):
 # ---------------------------------------------------------------------------
 
 class MarketRegime(Entity):
+    regime_id = Field(str, required=True)
+
     risk_on = Belief(initial=0.5)
     trend_following = Belief(initial=0.5)
     mean_reverting_regime = Belief(initial=0.5)
+
+    # Temporal: regime beliefs vary by market session
+    class Temporal:
+        time_partitions = ["market_session"]
+        timestamp_field = "observation_timestamp"
+
+    # Predicted regime shift — the highest-value alert in the system
+    predicted_risk_off = Alert(
+        trigger="risk_on",
+        threshold=0.3,
+        mode="predicted",
+        horizon_days=7,
+        severity="critical",
+        cooldown=14400,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -160,10 +253,13 @@ class MarketRegime(Entity):
 # ---------------------------------------------------------------------------
 
 class Position(Entity):
+    symbol = Field(str, required=True)
+
     profitable = Belief(initial=0.5)
     within_risk_limits = Belief(initial=0.8)
-    relative_strength = Belief(initial=0.5, learned=True)  # mirrored from Instrument for alert trigger
+    relative_strength = Belief(initial=0.5, learned=True)
 
+    # Current alerts
     stop_loss = Alert(
         trigger="relative_strength",
         threshold=0.25,
@@ -172,7 +268,6 @@ class Position(Entity):
         cooldown=60,
         auto_approve=True,
     )
-
     concentration_alert = Alert(
         trigger="within_risk_limits",
         threshold=0.3,
@@ -181,16 +276,27 @@ class Position(Entity):
         cooldown=600,
     )
 
+    # Predicted alert — early exit warning
+    predicted_weakness = Alert(
+        trigger="relative_strength",
+        threshold=0.3,
+        mode="predicted",
+        horizon_days=5,
+        severity="high",
+        cooldown=3600,
+    )
+
+    instrument = Relationship("Instrument")
+
     class Source:
         origin = "alpaca.positions"
         sync = "pull"
         interval = "1min"
         identity = "symbol"
+        fields = {"symbol": "symbol"}
         observe = {
             "unrealized_plpc": {"belief": "profitable", "true_strengthens": True},
         }
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +314,8 @@ class Portfolio(Entity):
         cooldown=300,
     )
 
+    positions = Relationship("Position", many=True)
+
     class Source:
         origin = "alpaca.account"
         sync = "pull"
@@ -218,13 +326,14 @@ class Portfolio(Entity):
         }
 
 
-
-
 # ---------------------------------------------------------------------------
 # MarketConcept — abstract market idea (e.g. "AI wave", "rate hike cycle")
 # ---------------------------------------------------------------------------
 
 class MarketConcept(Entity):
+    concept_id = Field(str, required=True)
+    name = Field(str)
+
     active = Belief(initial=0.5)
 
     related_instruments = Relationship("Instrument", many=True)
