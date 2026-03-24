@@ -28,11 +28,13 @@ def _regime_weights(regime: Any) -> dict[str, float]:
     mr = float(getattr(regime, "mean_reverting_regime", 0.5))
 
     return {
-        "relative_strength": 0.3 + 0.3 * tf - 0.1 * mr,
-        "exhaustion": 0.1 + 0.25 * mr - 0.05 * tf,
-        "pressure": 0.25 + 0.2 * tf - 0.1 * mr,
-        "retail_sentiment": 0.1 + 0.1 * mr,
-        "crowded": -(0.15 + 0.1 * tf),  # negative — crowding is a headwind
+        "price_trend_fast": 0.25 + 0.15 * tf,          # primary momentum signal
+        "price_trend_slow": 0.20 + 0.10 * tf,          # trend confirmation
+        "relative_strength": 0.15 + 0.15 * tf - 0.05 * mr,
+        "exhaustion": 0.10 + 0.20 * mr - 0.05 * tf,   # contrarian weight
+        "pressure": 0.15 + 0.10 * tf - 0.05 * mr,
+        "retail_sentiment": 0.05 + 0.05 * mr,
+        "crowded": -(0.10 + 0.05 * tf),                # always negative
     }
 
 
@@ -52,19 +54,24 @@ def _score_instrument(
     """
     eid = getattr(instrument, "external_id", None) or f"instrument:{getattr(instrument, 'symbol', '')}"
 
-    rs  = float(getattr(instrument, "relative_strength", 0.5))
-    exh = float(getattr(instrument, "exhaustion", 0.2))
-    prs = float(getattr(instrument, "pressure", 0.5))
-    snt = float(getattr(instrument, "retail_sentiment", 0.5))
-    cwd = float(getattr(instrument, "crowded", 0.3))
+    # Read ALL beliefs — Layer 1 (observable) drives direction when Layer 2/3 are unavailable
+    fast = float(getattr(instrument, "price_trend_fast", 0.5))
+    slow = float(getattr(instrument, "price_trend_slow", 0.5))
+    rs   = float(getattr(instrument, "relative_strength", 0.5))
+    exh  = float(getattr(instrument, "exhaustion", 0.2))
+    prs  = float(getattr(instrument, "pressure", 0.5))
+    snt  = float(getattr(instrument, "retail_sentiment", 0.5))
+    cwd  = float(getattr(instrument, "crowded", 0.3))
 
     # Centre beliefs around 0 so > 0.5 is bullish, < 0.5 is bearish
     layers = {
+        "price_trend_fast": fast - 0.5,     # primary directional signal
+        "price_trend_slow": slow - 0.5,     # confirmation signal
         "relative_strength": rs - 0.5,
-        "exhaustion": 0.5 - exh,        # high exhaustion → contrarian (bearish momentum)
+        "exhaustion": 0.5 - exh,            # high exhaustion → contrarian (bearish momentum)
         "pressure": prs - 0.5,
         "retail_sentiment": snt - 0.5,
-        "crowded": cwd - 0.5,           # weight is already negative → double-negative = bearish headwind
+        "crowded": cwd - 0.5,
     }
 
     edge = sum(weights.get(k, 0.0) * v for k, v in layers.items())
