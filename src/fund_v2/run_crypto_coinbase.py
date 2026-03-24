@@ -22,14 +22,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict
 
-# Core (liquid: 100+ trades/min)
-_CORE = ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD"]
-# Mid (moderate: 5-50 trades/min)
-_MID = ["AVAX-USD", "LINK-USD", "AAVE-USD", "DOGE-USD"]
-# Long tail (thin: 1-5 trades/min, but needed for graph density)
-_TAIL = ["DOT-USD", "UNI-USD", "ADA-USD", "ATOM-USD", "NEAR-USD", "ARB-USD", "MATIC-USD"]
+# Majors (500+ trades/min)
+_MAJORS = ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD"]
+# High volume (50+ trades/min)
+_HIGH = ["FET-USD", "AVAX-USD", "LINK-USD", "PEPE-USD", "DOGE-USD", "ADA-USD"]
+# Medium (10-50 trades/min)
+_MED = ["SUI-USD", "DOT-USD", "INJ-USD", "APT-USD", "CRV-USD"]
+# Lower (4-10 trades/min)
+_LOW = ["BONK-USD", "ARB-USD", "SHIB-USD", "AAVE-USD", "NEAR-USD",
+        "OP-USD", "UNI-USD", "ATOM-USD", "SEI-USD", "FIL-USD",
+        "TIA-USD", "LDO-USD", "GRT-USD"]
 
-CRYPTO_PAIRS = _CORE + _MID + _TAIL
+CRYPTO_PAIRS = _MAJORS + _HIGH + _MED + _LOW
 SYMBOLS_CLEAN = [c.replace("-", "") for c in CRYPTO_PAIRS]
 SIGNAL_INTERVAL = 60
 
@@ -86,47 +90,96 @@ def run():
         except Exception:
             pass
 
-    # Crypto ontology — sector groupings + competition for graph density
+    # Crypto ontology — 28 symbols, 10 sectors, competition + BTC dominance
     _CRYPTO_ONTOLOGY = [
-        # Sectors
+        # ── Sectors ──
+        # Layer 1 (store of value / base layer)
         ("BTCUSD", "in_sector", "layer1", 1.0),
         ("ETHUSD", "in_sector", "layer1", 1.0),
-        ("SOLUSD", "in_sector", "layer1_alt", 1.0),
-        ("AVAXUSD", "in_sector", "layer1_alt", 1.0),
-        ("NEARUSD", "in_sector", "layer1_alt", 1.0),
+        # Layer 1 alt (smart contract competitors)
+        ("SOLUSD", "in_sector", "l1_alt", 1.0),
+        ("AVAXUSD", "in_sector", "l1_alt", 1.0),
+        ("ADAUSD", "in_sector", "l1_alt", 1.0),
+        ("DOTUSD", "in_sector", "l1_alt", 1.0),
+        ("NEARUSD", "in_sector", "l1_alt", 1.0),
+        ("SUIUSD", "in_sector", "l1_alt", 1.0),
+        ("APTUSD", "in_sector", "l1_alt", 1.0),
+        ("SEIUSD", "in_sector", "l1_alt", 1.0),
+        ("INJUSD", "in_sector", "l1_alt", 1.0),
+        ("TIAUSD", "in_sector", "l1_alt", 1.0),
+        # Layer 2 (scaling solutions)
         ("ARBUSD", "in_sector", "layer2", 1.0),
+        ("OPUSD", "in_sector", "layer2", 1.0),
         ("MATICUSD", "in_sector", "layer2", 1.0),
-        ("LINKUSD", "in_sector", "oracle", 1.0),
+        # DeFi
         ("AAVEUSD", "in_sector", "defi", 1.0),
         ("UNIUSD", "in_sector", "defi", 1.0),
-        ("ADAUSD", "in_sector", "layer1_alt", 1.0),
-        ("DOTUSD", "in_sector", "layer1_alt", 1.0),
-        ("ATOMUSD", "in_sector", "interop", 1.0),
-        ("XRPUSD", "in_sector", "payments", 1.0),
+        ("CRVUSD", "in_sector", "defi", 1.0),
+        ("MKRUSD", "in_sector", "defi", 1.0),
+        ("LDOUSD", "in_sector", "defi", 1.0),
+        # Oracle / infra
+        ("LINKUSD", "in_sector", "infra", 1.0),
+        ("GRTUSD", "in_sector", "infra", 1.0),
+        ("FILUSD", "in_sector", "infra", 1.0),
+        # AI / compute
+        ("FETUSD", "in_sector", "ai_compute", 1.0),
+        ("RNDRUSD", "in_sector", "ai_compute", 1.0),
+        # Meme
         ("DOGEUSD", "in_sector", "meme", 1.0),
-        # Competition
+        ("SHIBUSD", "in_sector", "meme", 1.0),
+        ("PEPEUSD", "in_sector", "meme", 1.0),
+        ("BONKUSD", "in_sector", "meme", 1.0),
+        # Payments
+        ("XRPUSD", "in_sector", "payments", 1.0),
+        # Interop
+        ("ATOMUSD", "in_sector", "interop", 1.0),
+
+        # ── Competition ──
+        # L1 alt competition (all compete for the same TVL)
         ("SOLUSD", "competes_with", "ETHUSD", 0.8),
-        ("AVAXUSD", "competes_with", "ETHUSD", 0.7),
-        ("AVAXUSD", "competes_with", "SOLUSD", 0.6),
+        ("AVAXUSD", "competes_with", "SOLUSD", 0.7),
+        ("SUIUSD", "competes_with", "SOLUSD", 0.6),
+        ("APTUSD", "competes_with", "SUIUSD", 0.8),  # Move ecosystem
+        ("SEIUSD", "competes_with", "SUIUSD", 0.5),
         ("NEARUSD", "competes_with", "SOLUSD", 0.5),
-        ("MATICUSD", "competes_with", "ARBUSD", 0.8),
-        ("UNIUSD", "competes_with", "AAVEUSD", 0.5),
-        ("ADAUSD", "competes_with", "SOLUSD", 0.4),
-        ("DOTUSD", "competes_with", "ATOMUSD", 0.6),
-        # BTC dominance — everything follows BTC
+        ("ADAUSD", "competes_with", "ETHUSD", 0.4),
+        ("INJUSD", "competes_with", "SOLUSD", 0.4),
+        # L2 competition
+        ("ARBUSD", "competes_with", "OPUSD", 0.9),
+        ("MATICUSD", "competes_with", "ARBUSD", 0.7),
+        # DeFi competition
+        ("UNIUSD", "competes_with", "CRVUSD", 0.6),
+        ("AAVEUSD", "competes_with", "MKRUSD", 0.4),
+        # Meme competition (correlated, not competitive)
+        ("DOGEUSD", "competes_with", "SHIBUSD", 0.8),
+        ("PEPEUSD", "competes_with", "BONKUSD", 0.7),
+        # AI competition
+        ("FETUSD", "competes_with", "RNDRUSD", 0.7),
+
+        # ── BTC dominance — everything follows BTC ──
         ("BTCUSD", "leads", "ETHUSD", 0.8),
         ("BTCUSD", "leads", "SOLUSD", 0.6),
         ("BTCUSD", "leads", "XRPUSD", 0.5),
-        ("BTCUSD", "leads", "layer1_alt", 0.5),
+        ("BTCUSD", "leads", "l1_alt", 0.5),
         ("BTCUSD", "leads", "defi", 0.4),
-        # Sector types
+        ("BTCUSD", "leads", "meme", 0.6),
+        ("BTCUSD", "leads", "ai_compute", 0.4),
+        # ETH leads DeFi
+        ("ETHUSD", "leads", "defi", 0.7),
+        ("ETHUSD", "leads", "layer2", 0.8),
+        # SOL leads its ecosystem
+        ("SOLUSD", "leads", "BONKUSD", 0.5),
+        ("SOLUSD", "leads", "JUPUSD", 0.6),
+
+        # ── Sector types ──
         ("layer1", "is_a", "sector", 1.0),
-        ("layer1_alt", "is_a", "sector", 1.0),
+        ("l1_alt", "is_a", "sector", 1.0),
         ("layer2", "is_a", "sector", 1.0),
         ("defi", "is_a", "sector", 1.0),
-        ("oracle", "is_a", "sector", 1.0),
-        ("payments", "is_a", "sector", 1.0),
+        ("infra", "is_a", "sector", 1.0),
+        ("ai_compute", "is_a", "sector", 1.0),
         ("meme", "is_a", "sector", 1.0),
+        ("payments", "is_a", "sector", 1.0),
         ("interop", "is_a", "sector", 1.0),
     ]
     # Add bidirectional competition
