@@ -271,12 +271,12 @@ def run():
     def do_signals():
         nonlocal signal_count
 
-        # Unified decision: beliefs + thermodynamics in one pass
+        # Decision = ranked energy gaps (biggest goal gaps first)
         decision = generate_decision(
             engine=engine,
             symbols=SYMBOLS_CLEAN,
-            cost_per_symbol=cost_per_symbol,
             doc_ids=_doc_ids,
+            cost_per_symbol=cost_per_symbol,
         )
         elapsed = time.time() - start
 
@@ -290,19 +290,22 @@ def run():
             if sym in prices and entry["px"] > 0:
                 fwd = (prices[sym] - entry["px"]) / entry["px"]
                 entry["fwd"] = fwd
-                entry["ok"] = (entry["dir"] == "long" and fwd > 0) or (entry["dir"] == "short" and fwd < 0)
+                entry["ok"] = (
+                    (entry["dir"] in ("buy", "add") and fwd > 0) or
+                    (entry["dir"] in ("sell", "reduce", "exit") and fwd < 0)
+                )
                 entry["eval"] = True
 
         total_eval = sum(1 for s in signal_log if s.get("eval"))
         total_ok = sum(1 for s in signal_log if s.get("ok"))
         acc = total_ok / total_eval if total_eval > 0 else 0
 
-        # Print system state + signals
-        print(f"\n[{elapsed/60:.1f}m] trades={trade_count:,} obs={obs_count:,} signals={signal_count} eval={total_eval} acc={acc:.1%}")
+        # Print
+        print(f"\n[{elapsed/60:.1f}m] trades={trade_count:,} obs={obs_count:,} gaps={len(decision.gaps)} eval={total_eval} acc={acc:.1%}")
         print(format_decision(decision))
 
-        # Add prices to output
-        for sym in SYMBOLS_CLEAN:
+        # Prices
+        for sym in SYMBOLS_CLEAN[:6]:  # top 6 by volume
             px = prices.get(sym, 0)
             if px > 0:
                 ext_id = f"instrument:{sym}"
@@ -311,28 +314,23 @@ def run():
                     slow = engine.belief(f"{ext_id}:price_trend_slow")
                     print(f"  {sym:>8}: ${px:>10,.2f}  fast={fast:.3f}  slow={slow:.3f}")
                 except Exception:
-                    print(f"  {sym:>8}: ${px:>10,.2f}")
+                    pass
 
-        # Log signals for accuracy tracking
-        for sig in decision.signals:
-            if sig.direction == "neutral":
-                continue
-            px = prices.get(sig.symbol, 0)
+        # Log gaps for accuracy tracking
+        for gap in decision.gaps:
+            px = prices.get(gap.symbol, 0)
             signal_log.append({
-                "t": time.time(), "sym": sig.symbol, "dir": sig.direction,
-                "edge": sig.edge, "px": px, "size": sig.size,
-                "free_energy": sig.free_energy, "velocity": sig.velocity,
-                "phase": sig.phase,
+                "t": time.time(), "sym": gap.symbol, "dir": gap.action,
+                "fe": gap.free_energy, "px": px,
+                "belief": gap.belief_name, "current": gap.current, "goal": gap.goal,
+                "velocity": gap.velocity, "phase": gap.phase,
             })
             signal_count += 1
-            log("signal", {
-                "symbol": sig.symbol, "direction": sig.direction,
-                "edge": sig.edge, "conviction": sig.conviction,
-                "size": sig.size, "price": px,
-                "momentum": sig.momentum_component,
-                "thermo": sig.thermo_component,
-                "free_energy": sig.free_energy, "velocity": sig.velocity,
-                "phase": sig.phase,
+            log("gap", {
+                "symbol": gap.symbol, "action": gap.action,
+                "belief": gap.belief_name, "current": gap.current, "goal": gap.goal,
+                "free_energy": gap.free_energy, "velocity": gap.velocity,
+                "phase": gap.phase, "price": px,
                 "system_temp": decision.system.temperature,
                 "system_crit": decision.system.criticality,
             })
@@ -340,15 +338,12 @@ def run():
         if total_eval > 0:
             print(f"  Accuracy: {total_ok}/{total_eval} ({acc:.1%}) [5-min forward]")
 
-        # Log system state
         log("system", {
             "temperature": decision.system.temperature,
             "entropy": decision.system.entropy,
             "criticality": decision.system.criticality,
-            "criticality_tier": decision.system.criticality_tier,
-            "temp_scalar": decision.temperature_scalar,
-            "crit_discount": decision.criticality_discount,
-            "hotspots": decision.focus_count,
+            "warmup": decision.warmup,
+            "gaps": len(decision.gaps),
             "accuracy": acc, "evaluated": total_eval,
             "trades": trade_count, "obs": obs_count,
         })

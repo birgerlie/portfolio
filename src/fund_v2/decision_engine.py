@@ -1,14 +1,16 @@
-"""Unified decision engine — beliefs + thermodynamics in one pass.
+"""Decision engine — free energy as the priority queue.
 
-Reads SiliconDB beliefs (what things are) and thermodynamic state (how the
-system is behaving) together. No separate layers — one coherent read.
+Every belief has a goal. Free energy = how far reality is from that goal.
+The decision is: fix the biggest gaps first.
 
-The engine computes: temperature, free energy, velocity, phase state.
-We read these alongside beliefs and use them for:
-  - Position sizing (temperature scales size)
-  - Stock selection (energy hotspots only)
-  - Timing (velocity and phase)
-  - Risk (criticality gates everything)
+energy_field() → ranked list of what needs attention
+  → instrument with high FE from neutral goal → position opportunity
+  → instrument with high FE from exhaustion goal → exit signal
+  → portfolio with high FE from drawdown goal → reduce all
+  → strategy with high FE from performing goal → switch strategy
+
+No separate signal function, no Kelly formula, no regime detector.
+Free energy IS the signal. The goal gap IS the sizing.
 """
 
 from __future__ import annotations
@@ -17,95 +19,113 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 
+# ── Data types ───────────────────────────────────────────────────────────────
+
 @dataclass
-class InstrumentState:
-    """Complete state of one instrument — beliefs + thermo in one read."""
+class EnergyGap:
+    """One belief that's far from its goal."""
     symbol: str
-
-    # Beliefs (from belief nodes)
-    price_trend_fast: float = 0.5
-    price_trend_slow: float = 0.5
-    relative_strength: float = 0.5
-    exhaustion: float = 0.2
-    pressure: float = 0.5
-    retail_sentiment: float = 0.5
-    crowded: float = 0.3
-
-    # Thermo (from engine.node_thermo)
-    free_energy: float = 0.0      # surprise — how far from expected
-    velocity: float = 0.0         # rate of belief change
-    phase: str = "stable"         # stable / transition_up / transition_down
-
-    # Derived
-    is_hotspot: bool = False      # high free energy = something happening
+    belief_name: str
+    current: float
+    goal: float
+    free_energy: float
+    velocity: float
+    phase: str
+    direction: str        # "above_goal" or "below_goal"
+    action: str           # what to do about it
 
 
 @dataclass
 class SystemState:
-    """Complete state of the market system — thermo + regime."""
-    temperature: float = 0.0      # how fast everything is changing
-    entropy: float = 0.0          # rate of disorder creation
-    criticality: float = 0.0      # proximity to phase transition
-    criticality_tier: str = "normal"  # normal / elevated / critical
-
-
-@dataclass
-class Signal:
-    """One trading signal with full context."""
-    symbol: str
-    direction: str                # long / short / neutral
-    conviction: float             # 0-1 how sure
-    size: float                   # 0-0.30 position weight
-    edge: float                   # expected return after costs
-
-    # Why — what drove this signal
-    momentum_component: float = 0.0
-    thermo_component: float = 0.0
-    exhaustion_component: float = 0.0
-    pressure_component: float = 0.0
-
-    # Thermo context
-    free_energy: float = 0.0
-    velocity: float = 0.0
-    phase: str = "stable"
+    temperature: float = 0.0
+    entropy: float = 0.0
+    criticality: float = 0.0
+    criticality_tier: str = "normal"
 
 
 @dataclass
 class Decision:
-    """Complete portfolio decision."""
-    signals: List[Signal]
+    """Portfolio decision driven by energy gaps."""
+    gaps: List[EnergyGap]           # ranked by free energy (biggest first)
     system: SystemState
-    temperature_scalar: float = 1.0   # position size multiplier from temperature
-    criticality_discount: float = 1.0  # risk reduction from criticality
-    focus_count: int = 0              # how many instruments are hotspots
+    temperature_scalar: float = 1.0
+    warmup: bool = False
+
+    @property
+    def top_action(self) -> Optional[EnergyGap]:
+        return self.gaps[0] if self.gaps else None
+
+    @property
+    def longs(self) -> List[EnergyGap]:
+        return [g for g in self.gaps if g.action in ("buy", "add")]
+
+    @property
+    def shorts(self) -> List[EnergyGap]:
+        return [g for g in self.gaps if g.action in ("sell", "reduce", "exit")]
 
 
-def _get_native_handle(engine: Any) -> Any:
-    """Get the low-level SiliconDBNative handle that has thermo methods.
+# ── Native handle resolution ────────────────────────────────────────────────
 
-    The ORM engine chain: App.engine → SiliconDBNativeEngine → _db (SiliconDBNative)
-    Thermo methods live on SiliconDBNative, not on the ORM adapter.
-    """
-    # Direct native handle
+def _get_native(engine: Any) -> Any:
+    """Get the low-level handle that has thermo methods."""
     if hasattr(engine, "init_thermo"):
         return engine
-    # ORM NativeEngine wraps _db
     if hasattr(engine, "_db") and hasattr(engine._db, "init_thermo"):
         return engine._db
-    # High-level SiliconDB wraps _db
-    db = getattr(engine, "_db", None)
-    if db and hasattr(db, "init_thermo"):
-        return db
     return None
 
 
+# ── Core: read energy landscape ──────────────────────────────────────────────
+
+# Belief goals — what "normal" or "good" looks like.
+# These match the goals defined in entities.py.
+BELIEF_GOALS = {
+    "price_trend_fast": 0.5,      # neutral
+    "price_trend_slow": 0.5,      # neutral
+    "spread_tight": 0.8,          # liquid
+    "volume_normal": 0.6,         # normal
+    "relative_strength": 0.5,     # average
+    "exhaustion": 0.2,            # fresh
+    "pressure": 0.5,              # no pressure
+    "retail_sentiment": 0.5,      # balanced
+    "crowded": 0.2,               # uncrowded
+    "entry_ready": 0.7,           # we want this high
+    "exit_ready": 0.2,            # we want this low
+}
+
+# What action resolves each gap
+GAP_ACTIONS = {
+    # Price trending above goal (bullish) → buy opportunity
+    ("price_trend_fast", "above_goal"): "buy",
+    ("price_trend_slow", "above_goal"): "buy",
+    # Price trending below goal (bearish) → sell signal
+    ("price_trend_fast", "below_goal"): "sell",
+    ("price_trend_slow", "below_goal"): "sell",
+    # Exhaustion above goal → exit (move overdone)
+    ("exhaustion", "above_goal"): "exit",
+    # Crowded above goal → reduce (too many in the trade)
+    ("crowded", "above_goal"): "reduce",
+    # Pressure above goal → hedge or reduce
+    ("pressure", "above_goal"): "reduce",
+    # Relative strength above goal → add (outperforming)
+    ("relative_strength", "above_goal"): "add",
+    # Relative strength below goal → reduce (underperforming)
+    ("relative_strength", "below_goal"): "reduce",
+    # Entry ready above goal → buy
+    ("entry_ready", "above_goal"): "buy",
+    # Exit ready above goal → exit
+    ("exit_ready", "above_goal"): "exit",
+}
+
+
 def read_system_state(engine: Any) -> SystemState:
-    """Read system-level thermodynamic state."""
+    """Read system-level thermo."""
     state = SystemState()
-    native = _get_native_handle(engine)
-    if native is None:
-        # Try engine directly (might have thermo_state from mixin)
-        native = engine
+    native = _get_native(engine) or engine
+    try:
+        native.run_thermo_pass()
+    except Exception:
+        pass
     try:
         thermo = native.thermo_state()
         if thermo:
@@ -125,240 +145,159 @@ def read_system_state(engine: Any) -> SystemState:
     return state
 
 
-def read_instrument_state(engine: Any, symbol: str, ext_id: str, doc_id: int = -1) -> InstrumentState:
-    """Read one instrument's beliefs + thermo state in a single pass."""
-    state = InstrumentState(symbol=symbol)
+def compute_energy_gaps(
+    engine: Any,
+    symbols: List[str],
+    doc_ids: Dict[str, int] = None,
+    cost_per_symbol: Dict[str, float] = None,
+    min_free_energy: float = 0.05,
+) -> List[EnergyGap]:
+    """Compute free energy gap for every belief on every instrument.
 
-    # Read beliefs
-    for attr in ["price_trend_fast", "price_trend_slow", "relative_strength",
-                 "exhaustion", "pressure", "retail_sentiment", "crowded"]:
-        try:
-            setattr(state, attr, engine.belief(f"{ext_id}:{attr}"))
-        except Exception:
-            pass
+    Free energy = |current - goal|. Simple, interpretable, no KL divergence
+    needed at this level — the engine computes true KL on the Metal GPU,
+    but for the decision we just need the gap magnitude and direction.
+    """
+    doc_ids = doc_ids or {}
+    cost_per_symbol = cost_per_symbol or {}
+    native = _get_native(engine)
 
-    # Read thermo — need native handle and internal doc_id
-    try:
-        native = _get_native_handle(engine) or engine
-        if native and hasattr(native, "node_thermo") and doc_id >= 0:
-                nt = native.node_thermo(doc_id)
+    gaps = []
+
+    for symbol in symbols:
+        ext_id = f"instrument:{symbol}"
+        did = doc_ids.get(symbol, -1)
+
+        # Read per-node thermo
+        node_fe = 0.0
+        node_vel = 0.0
+        node_phase = "stable"
+        if native and did >= 0:
+            try:
+                nt = native.node_thermo(did)
                 if nt:
                     if isinstance(nt, dict):
-                        state.free_energy = nt.get("free_energy", 0.0)
-                        state.velocity = nt.get("velocity", 0.0)
-                        state.phase = nt.get("phase_state", "stable")
+                        node_fe = nt.get("free_energy", 0.0)
+                        node_vel = nt.get("velocity", 0.0)
+                        node_phase = nt.get("phase_state", "stable")
                     else:
-                        state.free_energy = getattr(nt, "free_energy", 0.0)
-                        state.velocity = getattr(nt, "velocity", 0.0)
+                        node_fe = getattr(nt, "free_energy", 0.0)
+                        node_vel = getattr(nt, "velocity", 0.0)
                         phase = getattr(nt, "phase_state", None)
-                        state.phase = phase.value if hasattr(phase, "value") else str(phase or "stable")
-    except Exception:
-        pass
+                        node_phase = phase.value if hasattr(phase, "value") else str(phase or "stable")
+            except Exception:
+                pass
 
-    # Hotspot: high free energy means this instrument is diverging from expected
-    state.is_hotspot = abs(state.free_energy) > 0.1
+        # Read each belief and compute gap from goal
+        for belief_name, goal in BELIEF_GOALS.items():
+            try:
+                current = engine.belief(f"{ext_id}:{belief_name}")
+            except Exception:
+                continue
 
-    return state
+            gap = current - goal
+            fe = abs(gap)
+
+            if fe < min_free_energy:
+                continue  # too close to goal — no action needed
+
+            direction = "above_goal" if gap > 0 else "below_goal"
+            action = GAP_ACTIONS.get((belief_name, direction), "watch")
+
+            # Skip "watch" actions — nothing to do
+            if action == "watch":
+                continue
+
+            # Cost filter: for buy/sell/add, check if the gap exceeds costs
+            if action in ("buy", "sell", "add"):
+                cost_bps = cost_per_symbol.get(symbol, 10)
+                if fe < cost_bps / 10000 * 2:  # gap must exceed 2x costs
+                    continue
+
+            gaps.append(EnergyGap(
+                symbol=symbol,
+                belief_name=belief_name,
+                current=round(current, 4),
+                goal=goal,
+                free_energy=round(fe + node_fe * 0.1, 4),  # boost by engine's FE
+                velocity=round(node_vel, 4),
+                phase=node_phase,
+                direction=direction,
+                action=action,
+            ))
+
+    # Sort by free energy descending — biggest gap first
+    gaps.sort(key=lambda g: g.free_energy, reverse=True)
+    return gaps
 
 
 def generate_decision(
     engine: Any,
     symbols: List[str],
-    macro_proxies: set[str] = None,
-    cost_per_symbol: Dict[str, float] = None,
     doc_ids: Dict[str, int] = None,
+    cost_per_symbol: Dict[str, float] = None,
+    **kwargs,
 ) -> Decision:
-    """Generate a complete portfolio decision from beliefs + thermodynamics.
+    """Generate a portfolio decision from the energy landscape.
 
-    This is the unified signal function. One pass reads:
-    - System thermo (temperature, criticality) → sizing and risk
-    - Per-instrument beliefs (momentum, exhaustion, pressure) → direction
-    - Per-instrument thermo (free energy, velocity, phase) → timing and selection
-    - Costs → net edge
-
-    Returns signals only for instruments worth trading.
+    One call. Reads system thermo + per-instrument belief gaps.
+    Returns ranked list of what to do, biggest gap first.
     """
-    macro_proxies = macro_proxies or set()
-    cost_per_symbol = cost_per_symbol or {}
-    doc_ids = doc_ids or {}
-
-    # ── Run thermo pass before reading state ────────────────────────
-    try:
-        native = _get_native_handle(engine)
-        if native and hasattr(native, 'run_thermo_pass'):
-            native.run_thermo_pass()
-    except Exception:
-        pass
-
-    # ── System state ─────────────────────────────────────────────────
     system = read_system_state(engine)
 
-    # Temperature → position size scaling
-    # High temperature = volatile, scale down. Low = calm, full size.
+    # Temperature scaling
     if system.temperature > 0.7:
-        temperature_scalar = 0.3     # crisis mode — 30% of normal size
+        temperature_scalar = 0.3
     elif system.temperature > 0.4:
-        temperature_scalar = 0.6     # elevated — 60%
+        temperature_scalar = 0.6
     else:
-        temperature_scalar = 1.0     # calm — full size
+        temperature_scalar = 1.0
 
-    # Criticality → risk discount
-    # During warmup (entropy > 10 = system still converging from cold start),
-    # ignore criticality — it's an artifact of beliefs moving from 0.5 to their
-    # initial values, not a real regime shift.
+    # Warmup detection
     warmup = system.entropy > 10.0
-    if warmup:
-        criticality_discount = 1.0   # ignore during warmup
-    elif system.criticality > 0.7:
-        criticality_discount = 0.5   # about to flip — 50% (was 30%, too aggressive)
-    elif system.criticality > 0.4:
-        criticality_discount = 0.7   # elevated — 70%
-    else:
-        criticality_discount = 1.0   # normal — no discount
 
-    # ── Per-instrument state ─────────────────────────────────────────
-    instruments = []
-    for symbol in symbols:
-        if symbol in macro_proxies:
-            continue
-        ext_id = f"instrument:{symbol}"
-        did = doc_ids.get(symbol, -1)
-        state = read_instrument_state(engine, symbol, ext_id, doc_id=did)
-        instruments.append(state)
-
-    # ── Energy hotspots — focus on what matters ──────────────────────
-    # Also try engine.energy_field for global hotspot ranking
-    try:
-        hotspots = engine.energy_field(budget=20, namespace="default")
-        if hotspots:
-            hotspot_ids = {h.get("external_id", h.get("node_id", "")) for h in hotspots}
-            for inst in instruments:
-                if f"instrument:{inst.symbol}" in hotspot_ids:
-                    inst.is_hotspot = True
-    except Exception:
-        pass  # fall back to per-node free_energy check
-
-    focus_count = sum(1 for i in instruments if i.is_hotspot)
-
-    # ── Score each instrument ────────────────────────────────────────
-    signals = []
-    for inst in instruments:
-
-        # Momentum: price trend direction
-        momentum = (inst.price_trend_fast - 0.5) * 0.4 + (inst.price_trend_slow - 0.5) * 0.3
-
-        # Thermo signal: free energy direction + velocity
-        # High free energy + positive velocity = diverging upward = momentum
-        # High free energy + negative velocity = diverging downward = bearish
-        # Low free energy = expected behavior = no thermo signal
-        thermo_signal = inst.free_energy * inst.velocity * 2.0
-
-        # Phase signal
-        phase_boost = 0.0
-        if inst.phase == "transition_up":
-            phase_boost = 0.05    # breakout bonus
-        elif inst.phase == "transition_down":
-            phase_boost = -0.05   # breakdown penalty
-
-        # Exhaustion: contrarian — high exhaustion suggests reversal
-        exhaustion_signal = (0.5 - inst.exhaustion) * 0.2
-
-        # Pressure: graph-propagated macro/sector pressure
-        pressure_signal = (inst.pressure - 0.5) * 0.15
-
-        # Crowd: penalty for crowded trades
-        crowd_penalty = (inst.crowded - 0.3) * 0.1
-
-        # Raw edge
-        edge = momentum + thermo_signal + phase_boost + exhaustion_signal + pressure_signal - crowd_penalty
-        edge = max(-1.0, min(1.0, edge))
-
-        # Direction
-        if abs(edge) < 0.01:
-            direction = "neutral"
-        else:
-            direction = "long" if edge > 0 else "short"
-
-        # Conviction: how confident across all signals
-        # Agreement between momentum, thermo, and pressure strengthens conviction
-        signals_agree = (
-            (1 if (momentum > 0) == (edge > 0) else 0) +
-            (1 if (thermo_signal > 0) == (edge > 0) else 0) +
-            (1 if (pressure_signal > 0) == (edge > 0) else 0)
-        )
-        conviction = min(1.0, abs(edge) * (0.5 + signals_agree * 0.15))
-
-        # Hotspot boost: higher conviction for energy hotspots
-        if inst.is_hotspot:
-            conviction = min(1.0, conviction * 1.3)
-
-        # Kelly sizing: f = 2p - 1, capped at 30%
-        kelly = max(0.0, 2 * conviction - 1)
-        raw_size = min(0.30, kelly)
-
-        # Apply system-level scaling
-        size = raw_size * temperature_scalar * criticality_discount
-
-        # Subtract costs
-        cost_bps = cost_per_symbol.get(inst.symbol, 5)  # default 5 bps
-        net_edge = abs(edge) - (cost_bps / 10000)
-
-        # Only signal if net edge positive and conviction meaningful
-        if net_edge <= 0 or conviction < 0.1:
-            direction = "neutral"
-            size = 0.0
-
-        signals.append(Signal(
-            symbol=inst.symbol,
-            direction=direction,
-            conviction=round(conviction, 4),
-            size=round(size, 4),
-            edge=round(net_edge if direction != "neutral" else 0.0, 4),
-            momentum_component=round(momentum, 4),
-            thermo_component=round(thermo_signal, 4),
-            exhaustion_component=round(exhaustion_signal, 4),
-            pressure_component=round(pressure_signal, 4),
-            free_energy=round(inst.free_energy, 4),
-            velocity=round(inst.velocity, 4),
-            phase=inst.phase,
-        ))
-
-    # Sort by conviction * size descending (best opportunities first)
-    signals.sort(key=lambda s: s.conviction * s.size, reverse=True)
+    # Compute all energy gaps
+    gaps = compute_energy_gaps(
+        engine=engine,
+        symbols=symbols,
+        doc_ids=doc_ids,
+        cost_per_symbol=cost_per_symbol,
+    )
 
     return Decision(
-        signals=signals,
+        gaps=gaps,
         system=system,
         temperature_scalar=temperature_scalar,
-        criticality_discount=criticality_discount,
-        focus_count=focus_count,
+        warmup=warmup,
     )
 
 
 def format_decision(d: Decision) -> str:
-    """Human-readable decision summary."""
+    """Human-readable decision."""
     lines = []
-    lines.append(f"System: temp={d.system.temperature:.3f} entropy={d.system.entropy:.3f} "
-                 f"criticality={d.system.criticality:.3f} ({d.system.criticality_tier})")
-    lines.append(f"Scaling: temp={d.temperature_scalar:.0%} crit={d.criticality_discount:.0%} "
-                 f"hotspots={d.focus_count}")
-    lines.append("")
+    lines.append(
+        f"System: temp={d.system.temperature:.3f} entropy={d.system.entropy:.3f} "
+        f"crit={d.system.criticality:.3f} ({d.system.criticality_tier})"
+    )
+    lines.append(f"Scaling: temp={d.temperature_scalar:.0%} warmup={d.warmup}")
 
-    for s in d.signals:
-        if s.direction == "neutral":
-            continue
-        arrow = "▲" if s.direction == "long" else "▼"
-        hot = "🔥" if s.free_energy > 0.1 else "  "
-        phase_str = f" [{s.phase}]" if s.phase != "stable" else ""
+    if not d.gaps:
+        lines.append("  No energy gaps above threshold — all beliefs near goals")
+        return "\n".join(lines)
+
+    # Group by action type
+    buys = [g for g in d.gaps if g.action in ("buy", "add")]
+    sells = [g for g in d.gaps if g.action in ("sell", "reduce", "exit")]
+
+    for g in d.gaps[:10]:  # top 10 gaps
+        arrow = "▲" if g.action in ("buy", "add") else "▼" if g.action in ("sell", "reduce", "exit") else "—"
+        phase_str = f" [{g.phase}]" if g.phase != "stable" else ""
+        hot = "🔥" if g.free_energy > 0.2 else ""
         lines.append(
-            f"  {arrow} {s.symbol:>8} {s.direction:>5} "
-            f"size={s.size:.1%} conv={s.conviction:.0%} edge={s.edge:.4f} "
-            f"mom={s.momentum_component:+.3f} thermo={s.thermo_component:+.3f} "
-            f"FE={s.free_energy:.3f} v={s.velocity:+.3f}{phase_str} {hot}"
+            f"  {arrow} {g.symbol:>8} {g.action:>6} "
+            f"FE={g.free_energy:.3f} {g.belief_name}={g.current:.3f} (goal={g.goal}) "
+            f"v={g.velocity:+.3f}{phase_str} {hot}"
         )
 
-    active = [s for s in d.signals if s.direction != "neutral"]
-    if not active:
-        lines.append("  No actionable signals")
-
+    lines.append(f"  Total: {len(buys)} buy/add, {len(sells)} sell/reduce/exit, {len(d.gaps)} total gaps")
     return "\n".join(lines)
