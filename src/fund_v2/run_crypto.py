@@ -71,7 +71,8 @@ def run():
 """)
 
     # ── SiliconDB ────────────────────────────────────────────────────
-    db_dir = tempfile.mkdtemp(prefix="v2_crypto_")
+    default_db = os.path.expanduser("~/.fund/silicondb_v2_crypto")
+    db_dir = os.environ.get("V2_CRYPTO_DB_PATH", default_db)
     try:
         from silicondb.engine.native import SiliconDBNativeEngine
         engine = SiliconDBNativeEngine(db_dir, dimension=384, tenant_id=3)

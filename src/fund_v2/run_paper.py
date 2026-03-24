@@ -132,8 +132,8 @@ def run():
     # Multi-tenant: Chargo=1, Fund V1=2, Fund V2=3
     # Use shared DB path (same as V1) or separate
     import tempfile
-    default_db = os.path.expanduser("~/.fund/silicondb")
-    db_dir = os.environ.get("SILICONDB_DB_PATH", default_db)
+    default_db = os.path.expanduser("~/.fund/silicondb_v2")
+    db_dir = os.environ.get("V2_DB_PATH", default_db)
     tenant_id = int(os.environ.get("V2_TENANT_ID", "3"))
     print(f"SiliconDB: {db_dir} (tenant={tenant_id})")
 
