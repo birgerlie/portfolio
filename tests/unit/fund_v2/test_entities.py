@@ -194,11 +194,12 @@ def test_all_entities_includes_all():
     assert Instrument in ALL_ENTITIES
     assert Sector in ALL_ENTITIES
     assert Position in ALL_ENTITIES
-    assert len(ALL_ENTITIES) == 9
+    assert len(ALL_ENTITIES) == 10  # added Strategy
 
 
-def test_market_regime_has_3_beliefs():
+def test_market_regime_has_beliefs():
     assert "risk_on" in MarketRegime._beliefs
     assert "trend_following" in MarketRegime._beliefs
     assert "mean_reverting_regime" in MarketRegime._beliefs
-    assert len(MarketRegime._beliefs) == 3
+    assert "stable" in MarketRegime._beliefs
+    assert len(MarketRegime._beliefs) == 4
