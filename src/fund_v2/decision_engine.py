@@ -140,16 +140,25 @@ def read_instrument_state(engine: Any, symbol: str, ext_id: str) -> InstrumentSt
     # Read thermo — need native handle and internal doc_id
     try:
         native = _get_native_handle(engine) or engine
-        # node_thermo takes an integer doc_id, not a string external_id
-        # Try to get the doc to find its internal ID
-        doc = engine.get(ext_id)
-        doc_id = doc.get("doc_id", 0) if isinstance(doc, dict) and doc else 0
-        node_thermo = native.node_thermo(doc_id) if doc_id else None
-        if node_thermo:
-            state.free_energy = getattr(node_thermo, "free_energy", 0.0)
-            state.velocity = getattr(node_thermo, "velocity", 0.0)
-            phase = getattr(node_thermo, "phase_state", None)
-            state.phase = phase.value if hasattr(phase, "value") else str(phase or "stable")
+        if native and hasattr(native, "node_thermo"):
+            # node_thermo takes an integer doc_id
+            # Try multiple ways to get the internal ID
+            doc = engine.get(ext_id)
+            doc_id = None
+            if isinstance(doc, dict) and doc:
+                doc_id = doc.get("doc_id") or doc.get("id") or doc.get("internal_id")
+            if doc_id:
+                nt = native.node_thermo(int(doc_id))
+                if nt:
+                    if isinstance(nt, dict):
+                        state.free_energy = nt.get("free_energy", 0.0)
+                        state.velocity = nt.get("velocity", 0.0)
+                        state.phase = nt.get("phase_state", "stable")
+                    else:
+                        state.free_energy = getattr(nt, "free_energy", 0.0)
+                        state.velocity = getattr(nt, "velocity", 0.0)
+                        phase = getattr(nt, "phase_state", None)
+                        state.phase = phase.value if hasattr(phase, "value") else str(phase or "stable")
     except Exception:
         pass
 
@@ -199,11 +208,16 @@ def generate_decision(
         temperature_scalar = 1.0     # calm — full size
 
     # Criticality → risk discount
-    # Near phase transition = reduce everything
-    if system.criticality > 0.7:
-        criticality_discount = 0.3   # about to flip — 30%
+    # During warmup (entropy > 10 = system still converging from cold start),
+    # ignore criticality — it's an artifact of beliefs moving from 0.5 to their
+    # initial values, not a real regime shift.
+    warmup = system.entropy > 10.0
+    if warmup:
+        criticality_discount = 1.0   # ignore during warmup
+    elif system.criticality > 0.7:
+        criticality_discount = 0.5   # about to flip — 50% (was 30%, too aggressive)
     elif system.criticality > 0.4:
-        criticality_discount = 0.6   # elevated — 60%
+        criticality_discount = 0.7   # elevated — 70%
     else:
         criticality_discount = 1.0   # normal — no discount
 
