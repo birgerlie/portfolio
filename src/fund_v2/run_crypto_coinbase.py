@@ -93,26 +93,8 @@ def run():
         with open(log_path, "a") as f:
             f.write(json.dumps({"ts": datetime.now(timezone.utc).isoformat(), "type": entry_type, **data}) + "\n")
 
-    # Signal generation
-    from fund_v2.signals import generate_signals_impl
-
-    def gen_signals():
-        regime = type("R", (), {"trend_following": 0.5, "mean_reverting_regime": 0.5, "risk_on": 0.5})()
-        instruments = []
-        for sym in SYMBOLS_CLEAN:
-            ext_id = f"instrument:{sym}"
-            inst = type("I", (), {"external_id": ext_id, "symbol": sym})()
-            for attr in ["relative_strength", "exhaustion", "pressure",
-                         "retail_sentiment", "crowded", "price_trend_fast", "price_trend_slow"]:
-                try:
-                    setattr(inst, attr, engine.belief(f"{ext_id}:{attr}"))
-                except Exception:
-                    setattr(inst, attr, 0.5)
-            instruments.append(inst)
-        try:
-            return generate_signals_impl(engine, regime=regime, instruments=instruments).get("signals", [])
-        except Exception:
-            return []
+    # Decision engine — unified beliefs + thermodynamics
+    from fund_v2.decision_engine import generate_decision, format_decision
 
     # State
     stop = threading.Event()
@@ -191,12 +173,16 @@ def run():
 
     def do_signals():
         nonlocal signal_count
-        signals = gen_signals()
+
+        # Unified decision: beliefs + thermodynamics in one pass
+        decision = generate_decision(
+            engine=engine,
+            symbols=SYMBOLS_CLEAN,
+            cost_per_symbol={s: 5 for s in SYMBOLS_CLEAN},  # 5 bps default for crypto
+        )
         elapsed = time.time() - start
 
         # Evaluate past signals (5-min forward)
-        correct = 0
-        evaluated = 0
         for entry in signal_log:
             if entry.get("eval"):
                 continue
@@ -208,56 +194,66 @@ def run():
                 entry["fwd"] = fwd
                 entry["ok"] = (entry["dir"] == "long" and fwd > 0) or (entry["dir"] == "short" and fwd < 0)
                 entry["eval"] = True
-                evaluated += 1
-                if entry["ok"]:
-                    correct += 1
 
         total_eval = sum(1 for s in signal_log if s.get("eval"))
         total_ok = sum(1 for s in signal_log if s.get("ok"))
         acc = total_ok / total_eval if total_eval > 0 else 0
 
-        # Print
+        # Print system state + signals
         print(f"\n[{elapsed/60:.1f}m] trades={trade_count:,} obs={obs_count:,} signals={signal_count} eval={total_eval} acc={acc:.1%}")
+        print(format_decision(decision))
+
+        # Add prices to output
         for sym in SYMBOLS_CLEAN:
-            ext_id = f"instrument:{sym}"
-            try:
-                fast = engine.belief(f"{ext_id}:price_trend_fast")
-                slow = engine.belief(f"{ext_id}:price_trend_slow")
-                exh = engine.belief(f"{ext_id}:exhaustion")
-                px = prices.get(sym, 0)
-                print(f"  {sym:>8}: ${px:>10,.2f}  fast={fast:.3f}  slow={slow:.3f}  exh={exh:.3f}")
-            except Exception:
-                pass
-
-        for sig in signals:
-            sym = sig.get("symbol", "")
-            d = sig.get("direction", "")
-            e = sig.get("edge", 0)
-            c = sig.get("confidence", 0)
             px = prices.get(sym, 0)
-            arrow = "▲" if d == "long" else "▼" if d == "short" else "—"
-            print(f"  {arrow} {sym} {d} edge={e:.3f} conf={c:.3f}")
+            if px > 0:
+                ext_id = f"instrument:{sym}"
+                try:
+                    fast = engine.belief(f"{ext_id}:price_trend_fast")
+                    slow = engine.belief(f"{ext_id}:price_trend_slow")
+                    print(f"  {sym:>8}: ${px:>10,.2f}  fast={fast:.3f}  slow={slow:.3f}")
+                except Exception:
+                    print(f"  {sym:>8}: ${px:>10,.2f}")
 
-            signal_log.append({"t": time.time(), "sym": sym, "dir": d, "edge": e, "px": px})
+        # Log signals for accuracy tracking
+        for sig in decision.signals:
+            if sig.direction == "neutral":
+                continue
+            px = prices.get(sig.symbol, 0)
+            signal_log.append({
+                "t": time.time(), "sym": sig.symbol, "dir": sig.direction,
+                "edge": sig.edge, "px": px, "size": sig.size,
+                "free_energy": sig.free_energy, "velocity": sig.velocity,
+                "phase": sig.phase,
+            })
             signal_count += 1
-            log("signal", {"symbol": sym, "direction": d, "edge": e, "confidence": c, "price": px})
+            log("signal", {
+                "symbol": sig.symbol, "direction": sig.direction,
+                "edge": sig.edge, "conviction": sig.conviction,
+                "size": sig.size, "price": px,
+                "momentum": sig.momentum_component,
+                "thermo": sig.thermo_component,
+                "free_energy": sig.free_energy, "velocity": sig.velocity,
+                "phase": sig.phase,
+                "system_temp": decision.system.temperature,
+                "system_crit": decision.system.criticality,
+            })
 
         if total_eval > 0:
             print(f"  Accuracy: {total_ok}/{total_eval} ({acc:.1%}) [5-min forward]")
 
-        # Log beliefs
-        beliefs = {}
-        for sym in SYMBOLS_CLEAN:
-            ext_id = f"instrument:{sym}"
-            b = {}
-            for attr in ["price_trend_fast", "price_trend_slow", "exhaustion"]:
-                try:
-                    b[attr] = round(engine.belief(f"{ext_id}:{attr}"), 4)
-                except Exception:
-                    b[attr] = 0.5
-            b["price"] = prices.get(sym, 0)
-            beliefs[sym] = b
-        log("beliefs", {"beliefs": beliefs, "accuracy": acc, "evaluated": total_eval, "trades": trade_count, "obs": obs_count})
+        # Log system state
+        log("system", {
+            "temperature": decision.system.temperature,
+            "entropy": decision.system.entropy,
+            "criticality": decision.system.criticality,
+            "criticality_tier": decision.system.criticality_tier,
+            "temp_scalar": decision.temperature_scalar,
+            "crit_discount": decision.criticality_discount,
+            "hotspots": decision.focus_count,
+            "accuracy": acc, "evaluated": total_eval,
+            "trades": trade_count, "obs": obs_count,
+        })
 
     # Start
     consumer = threading.Thread(target=consume, daemon=True, name="cb-consumer")
