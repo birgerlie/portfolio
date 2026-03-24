@@ -269,10 +269,17 @@ def run():
             price_up = price > prev
             move = abs(price - prev) / prev if prev > 0 else 0
             prices[sym] = price
-            prev_prices[sym] = price
 
-            # Scale observations by move magnitude
-            n = min(10, max(1, int(move * 20000)))
+            # (#1) Faster reversal response: when direction flips from recent trend,
+            # send extra observations to push belief back faster
+            prev_up = prev_prices.get(sym + "_dir")
+            direction_flipped = prev_up is not None and price_up != prev_up
+            prev_prices[sym] = price
+            prev_prices[sym + "_dir"] = price_up
+
+            # Scale observations: more on direction flip, normal otherwise
+            base_n = min(10, max(1, int(move * 20000)))
+            n = base_n * 3 if direction_flipped else base_n
             for _ in range(n):
                 try:
                     engine.observe(f"{ext_id}:price_trend_fast", confirmed=price_up, source="coinbase")

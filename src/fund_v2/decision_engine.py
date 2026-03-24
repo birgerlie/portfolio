@@ -151,8 +151,9 @@ def read_system_state(engine: Any) -> SystemState:
     return state
 
 
-# (#3) Previous free energy state for reversal detection
+# (#3) Previous state for reversal + change detection
 _prev_fe: Dict[str, Dict[str, float]] = {}  # symbol → {belief_name: prev_fe}
+_prev_actions: Dict[str, str] = {}  # symbol → previous action
 
 
 def compute_energy_gaps(
@@ -304,7 +305,11 @@ def _compute_sizes(
     1. Reduce if same sector already has exposure (concentration penalty)
     2. Boost if position hedges an existing one (competitor pair)
     3. Cap at max_position per instrument, max_sector_exposure per sector
+    4. (#2) Boost size when velocity confirms direction (momentum alignment)
+    5. (#3) Reduce size when action hasn't changed since last cycle (stale signal)
     """
+    global _prev_actions
+
     # Deduplicate: take the highest FE gap per symbol (one action per instrument)
     best_per_symbol: Dict[str, EnergyGap] = {}
     for g in gaps:
@@ -353,7 +358,24 @@ def _compute_sizes(
                 elif corr > 0.6:
                     size *= (1 - corr * 0.3)  # reduce by correlation
 
-        if size < 0.005:  # minimum 0.5% position
+        # (#2) Velocity alignment boost: if velocity confirms the gap direction, boost
+        if g.velocity != 0:
+            vel_confirms = (
+                (g.action in ("sell", "reduce", "exit") and g.velocity < 0) or
+                (g.action in ("buy", "add") and g.velocity > 0)
+            )
+            if vel_confirms:
+                size = min(max_position, size * 1.3)  # 30% boost
+            elif abs(g.velocity) > 0.005:
+                size *= 0.5  # velocity opposes → reduce 50%
+
+        # (#3) Stale signal detection: if same action as last cycle, reduce
+        prev_action = _prev_actions.get(g.symbol)
+        if prev_action == g.action:
+            size *= 0.7  # 30% reduction for unchanged signal
+        _prev_actions[g.symbol] = g.action
+
+        if size < 0.005:
             size = 0.0
 
         g.size = round(size, 4)
