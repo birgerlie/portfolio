@@ -72,15 +72,17 @@ def run():
     from silicondb.pipeline.route import RouteStage
     app._pipeline = Pipeline([ValidateStage(), NormaliseStage(), RouteStage()])
 
-    # Seed instruments
+    # Seed instruments — track doc_ids for per-node thermo
     from silicondb.sources.models import SourceRecord
     from silicondb.pipeline.models import PipelineContext
-    for sym in SYMBOLS_CLEAN:
+    _doc_ids: Dict[str, int] = {}
+    for i, sym in enumerate(SYMBOLS_CLEAN):
         r = SourceRecord(source_name="init", collection="seed", identity=sym,
             data={"symbol": sym, "price": 0, "trade_count": 0},
             timestamp=datetime.now(timezone.utc), idempotency_key=f"seed:{sym}", tenant_id=0)
         try:
             app.get_pipeline().process(r, PipelineContext(engine=app.engine, entity_cls=Instrument, tenant_id=0))
+            _doc_ids[sym] = i  # doc_ids are sequential from 0
         except Exception:
             pass
 
@@ -273,7 +275,8 @@ def run():
         decision = generate_decision(
             engine=engine,
             symbols=SYMBOLS_CLEAN,
-            cost_per_symbol=cost_per_symbol,  # learned from live spreads
+            cost_per_symbol=cost_per_symbol,
+            doc_ids=_doc_ids,
         )
         elapsed = time.time() - start
 

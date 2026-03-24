@@ -125,7 +125,7 @@ def read_system_state(engine: Any) -> SystemState:
     return state
 
 
-def read_instrument_state(engine: Any, symbol: str, ext_id: str) -> InstrumentState:
+def read_instrument_state(engine: Any, symbol: str, ext_id: str, doc_id: int = -1) -> InstrumentState:
     """Read one instrument's beliefs + thermo state in a single pass."""
     state = InstrumentState(symbol=symbol)
 
@@ -140,15 +140,8 @@ def read_instrument_state(engine: Any, symbol: str, ext_id: str) -> InstrumentSt
     # Read thermo — need native handle and internal doc_id
     try:
         native = _get_native_handle(engine) or engine
-        if native and hasattr(native, "node_thermo"):
-            # node_thermo takes an integer doc_id
-            # Try multiple ways to get the internal ID
-            doc = engine.get(ext_id)
-            doc_id = None
-            if isinstance(doc, dict) and doc:
-                doc_id = doc.get("doc_id") or doc.get("id") or doc.get("internal_id")
-            if doc_id:
-                nt = native.node_thermo(int(doc_id))
+        if native and hasattr(native, "node_thermo") and doc_id >= 0:
+                nt = native.node_thermo(doc_id)
                 if nt:
                     if isinstance(nt, dict):
                         state.free_energy = nt.get("free_energy", 0.0)
@@ -173,6 +166,7 @@ def generate_decision(
     symbols: List[str],
     macro_proxies: set[str] = None,
     cost_per_symbol: Dict[str, float] = None,
+    doc_ids: Dict[str, int] = None,
 ) -> Decision:
     """Generate a complete portfolio decision from beliefs + thermodynamics.
 
@@ -186,6 +180,7 @@ def generate_decision(
     """
     macro_proxies = macro_proxies or set()
     cost_per_symbol = cost_per_symbol or {}
+    doc_ids = doc_ids or {}
 
     # ── Run thermo pass before reading state ────────────────────────
     try:
@@ -227,7 +222,8 @@ def generate_decision(
         if symbol in macro_proxies:
             continue
         ext_id = f"instrument:{symbol}"
-        state = read_instrument_state(engine, symbol, ext_id)
+        did = doc_ids.get(symbol, -1)
+        state = read_instrument_state(engine, symbol, ext_id, doc_id=did)
         instruments.append(state)
 
     # ── Energy hotspots — focus on what matters ──────────────────────
