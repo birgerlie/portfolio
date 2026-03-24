@@ -409,7 +409,7 @@ def _compute_sizes(
         prev_count = prev_action.get("count", 0)
         if prev_act == g.action:
             stale_count = prev_count + 1
-            size *= 0.5 ** min(stale_count, 5)  # halve each cycle, cap at 5
+            size *= 0.8 ** min(stale_count, 8)  # 20% decay per cycle, floor at 0.8^8 = 17%
         else:
             stale_count = 0  # action changed — reset
         _prev_actions[g.symbol] = {"action": g.action, "count": stale_count}
