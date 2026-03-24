@@ -369,21 +369,29 @@ def run():
                 except Exception:
                     pass
 
-        # Log gaps for accuracy tracking
+        # (#2) Log only deduped gaps (one per symbol, highest FE) for accuracy
+        seen_symbols = set()
         for gap in decision.gaps:
+            if gap.symbol in seen_symbols or gap.size <= 0:
+                continue
+            seen_symbols.add(gap.symbol)
             px = prices.get(gap.symbol, 0)
             signal_log.append({
                 "t": time.time(), "sym": gap.symbol, "dir": gap.action,
-                "fe": gap.free_energy, "px": px,
+                "fe": gap.free_energy, "px": px, "size": gap.size,
                 "belief": gap.belief_name, "current": gap.current, "goal": gap.goal,
                 "velocity": gap.velocity, "phase": gap.phase,
+                "hedged_by": gap.hedged_by,
             })
             signal_count += 1
             log("gap", {
-                "symbol": gap.symbol, "action": gap.action,
+                "symbol": gap.symbol, "action": gap.action, "size": gap.size,
                 "belief": gap.belief_name, "current": gap.current, "goal": gap.goal,
                 "free_energy": gap.free_energy, "velocity": gap.velocity,
                 "phase": gap.phase, "price": px,
+                "hedged_by": gap.hedged_by,
+                "dir_crowding": decision.directional_crowding,
+                "crowd_scalar": decision.crowd_scalar,
                 "system_temp": decision.system.temperature,
                 "system_crit": decision.system.criticality,
             })
@@ -397,6 +405,9 @@ def run():
             "criticality": decision.system.criticality,
             "warmup": decision.warmup,
             "gaps": len(decision.gaps),
+            "sized": len([g for g in decision.gaps if g.size > 0]),
+            "dir_crowding": decision.directional_crowding,
+            "crowd_scalar": decision.crowd_scalar,
             "accuracy": acc, "evaluated": total_eval,
             "trades": trade_count, "obs": obs_count,
         })

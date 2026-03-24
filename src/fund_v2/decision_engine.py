@@ -48,11 +48,14 @@ class SystemState:
 @dataclass
 class Decision:
     """Portfolio decision driven by energy gaps."""
-    gaps: List[EnergyGap]           # ranked by free energy (biggest first)
-    system: SystemState
+    gaps: List[EnergyGap]           # one per symbol (deduped, sized)
+    all_gaps: List[EnergyGap] = field(default_factory=list)  # all gaps for logging
+    system: SystemState = field(default_factory=SystemState)
     temperature_scalar: float = 1.0
     warmup: bool = False
     sector_exposure: Dict[str, float] = field(default_factory=dict)
+    directional_crowding: float = 0.0  # 0=balanced, 1=all same direction
+    crowd_scalar: float = 1.0          # reduction factor from crowding
 
     @property
     def top_action(self) -> Optional[EnergyGap]:
@@ -148,6 +151,10 @@ def read_system_state(engine: Any) -> SystemState:
     return state
 
 
+# (#3) Previous free energy state for reversal detection
+_prev_fe: Dict[str, Dict[str, float]] = {}  # symbol → {belief_name: prev_fe}
+
+
 def compute_energy_gaps(
     engine: Any,
     symbols: List[str],
@@ -157,10 +164,10 @@ def compute_energy_gaps(
 ) -> List[EnergyGap]:
     """Compute free energy gap for every belief on every instrument.
 
-    Free energy = |current - goal|. Simple, interpretable, no KL divergence
-    needed at this level — the engine computes true KL on the Metal GPU,
-    but for the decision we just need the gap magnitude and direction.
+    Includes reversal detection: when free energy was high and is now
+    falling (gap shrinking), that's a mean-reversion signal → buy.
     """
+    global _prev_fe
     doc_ids = doc_ids or {}
     cost_per_symbol = cost_per_symbol or {}
     native = _get_native(engine)
@@ -191,7 +198,9 @@ def compute_energy_gaps(
             except Exception:
                 pass
 
-        # Read each belief and compute gap from goal
+        prev_symbol_fe = _prev_fe.get(symbol, {})
+        curr_symbol_fe = {}
+
         for belief_name, goal in BELIEF_GOALS.items():
             try:
                 current = engine.belief(f"{ext_id}:{belief_name}")
@@ -200,21 +209,37 @@ def compute_energy_gaps(
 
             gap = current - goal
             fe = abs(gap)
+            curr_symbol_fe[belief_name] = fe
 
             if fe < min_free_energy:
-                continue  # too close to goal — no action needed
+                # (#3) Reversal detection: FE was high, now dropping back toward goal
+                prev = prev_symbol_fe.get(belief_name, 0)
+                if prev > 0.15 and fe < prev * 0.7:  # FE dropped 30%+ from previous
+                    # Gap is shrinking — mean reversion in progress
+                    reversal_action = "buy" if gap < 0 else "sell"  # opposite of the gap direction
+                    gaps.append(EnergyGap(
+                        symbol=symbol,
+                        belief_name=belief_name,
+                        current=round(current, 4),
+                        goal=goal,
+                        free_energy=round(prev - fe + node_fe * 0.1, 4),  # reversal strength
+                        velocity=round(node_vel, 4),
+                        phase=node_phase,
+                        direction="reversal",
+                        action=reversal_action,
+                    ))
+                continue
 
             direction = "above_goal" if gap > 0 else "below_goal"
             action = GAP_ACTIONS.get((belief_name, direction), "watch")
 
-            # Skip "watch" actions — nothing to do
             if action == "watch":
                 continue
 
-            # Cost filter: for buy/sell/add, check if the gap exceeds costs
+            # Cost filter
             if action in ("buy", "sell", "add"):
                 cost_bps = cost_per_symbol.get(symbol, 10)
-                if fe < cost_bps / 10000 * 2:  # gap must exceed 2x costs
+                if fe < cost_bps / 10000 * 2:
                     continue
 
             gaps.append(EnergyGap(
@@ -222,14 +247,15 @@ def compute_energy_gaps(
                 belief_name=belief_name,
                 current=round(current, 4),
                 goal=goal,
-                free_energy=round(fe + node_fe * 0.1, 4),  # boost by engine's FE
+                free_energy=round(fe + node_fe * 0.1, 4),
                 velocity=round(node_vel, 4),
                 phase=node_phase,
                 direction=direction,
                 action=action,
             ))
 
-    # Sort by free energy descending — biggest gap first
+        _prev_fe[symbol] = curr_symbol_fe
+
     gaps.sort(key=lambda g: g.free_energy, reverse=True)
     return gaps
 
@@ -381,22 +407,50 @@ def generate_decision(
     warmup = system.entropy > 10.0
 
     # Compute all energy gaps
-    raw_gaps = compute_energy_gaps(
+    all_gaps = compute_energy_gaps(
         engine=engine,
         symbols=symbols,
         doc_ids=doc_ids,
         cost_per_symbol=cost_per_symbol,
     )
 
-    # Size positions with graph correlation + hedging
-    sized_gaps, sector_exposure = _compute_sizes(raw_gaps, temperature_scalar)
+    # (#1) Directional crowding detection
+    # When >80% of gaps point the same way, it's one market bet, not many independent bets
+    if all_gaps:
+        buys = sum(1 for g in all_gaps if g.action in ("buy", "add"))
+        sells = sum(1 for g in all_gaps if g.action in ("sell", "reduce", "exit"))
+        total = buys + sells
+        if total > 0:
+            dominant = max(buys, sells)
+            directional_crowding = dominant / total  # 0.5 = balanced, 1.0 = all same
+        else:
+            directional_crowding = 0.0
+
+        # Scale down when crowded: 100% same direction → 30% of normal size
+        if directional_crowding > 0.8:
+            crowd_scalar = 0.3
+        elif directional_crowding > 0.6:
+            crowd_scalar = 0.6
+        else:
+            crowd_scalar = 1.0
+    else:
+        directional_crowding = 0.0
+        crowd_scalar = 1.0
+
+    # Size positions with graph correlation + hedging + crowd scalar
+    sized_gaps, sector_exposure = _compute_sizes(
+        all_gaps, temperature_scalar * crowd_scalar,
+    )
 
     return Decision(
         gaps=sized_gaps,
+        all_gaps=all_gaps,
         system=system,
         temperature_scalar=temperature_scalar,
         warmup=warmup,
         sector_exposure=sector_exposure,
+        directional_crowding=directional_crowding,
+        crowd_scalar=crowd_scalar,
     )
 
 
@@ -407,7 +461,7 @@ def format_decision(d: Decision) -> str:
         f"System: temp={d.system.temperature:.3f} entropy={d.system.entropy:.3f} "
         f"crit={d.system.criticality:.3f} ({d.system.criticality_tier})"
     )
-    lines.append(f"Scaling: temp={d.temperature_scalar:.0%} warmup={d.warmup}")
+    lines.append(f"Scaling: temp={d.temperature_scalar:.0%} crowd={d.crowd_scalar:.0%} dir_crowd={d.directional_crowding:.0%} warmup={d.warmup}")
 
     if not d.gaps:
         lines.append("  No energy gaps above threshold — all beliefs near goals")
