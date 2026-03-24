@@ -114,33 +114,6 @@ def run():
         except Exception:
             return []
 
-    # (#4) Relative strength between coins
-    _rs_baseline: Dict[str, float] = {}
-
-    def _update_relative_strength(eng, current_prices, syms):
-        nonlocal _rs_baseline
-        # Initialize baselines on first call
-        if not _rs_baseline:
-            _rs_baseline.update(current_prices)
-            return
-        # Compute returns since baseline for each symbol
-        returns = {}
-        for s in syms:
-            if s in current_prices and s in _rs_baseline and _rs_baseline[s] > 0:
-                returns[s] = (current_prices[s] - _rs_baseline[s]) / _rs_baseline[s]
-        if len(returns) < 2:
-            return
-        avg_ret = sum(returns.values()) / len(returns)
-        for s, ret in returns.items():
-            try:
-                eng.observe(f"instrument:{s}:relative_strength",
-                            confirmed=(ret > avg_ret), source="relative")
-            except Exception:
-                pass
-        # Reset baseline every 500 calls (~every 5 min at 100-trade intervals)
-        if sum(1 for _ in returns) > 0:
-            _rs_baseline.update(current_prices)
-
     # State
     stop = threading.Event()
     obs_count = 0
@@ -178,50 +151,35 @@ def run():
 
             price_up = price > prev
             move = abs(price - prev) / prev if prev > 0 else 0
-            trade_size = event.data.get("size", 0)
             prices[sym] = price
             prev_prices[sym] = price
 
-            # (#2) Faster belief response: 3x more observations per trade
-            # Volume-weighted (#7): large trades get proportionally more observations
-            size_mult = min(5.0, max(1.0, trade_size * 100)) if trade_size > 0 else 1.0
-            n_fast = min(30, max(3, int(move * 60000 * size_mult)))
-            n_slow = max(1, n_fast // 3)
-
-            for _ in range(n_fast):
+            # Scale observations by move magnitude
+            n = min(10, max(1, int(move * 20000)))
+            for _ in range(n):
                 try:
                     engine.observe(f"{ext_id}:price_trend_fast", confirmed=price_up, source="coinbase")
                     obs_count += 1
                 except Exception:
                     break
 
-            for _ in range(n_slow):
+            # Slow trend — fewer observations
+            for _ in range(max(1, n // 4)):
                 try:
                     engine.observe(f"{ext_id}:price_trend_slow", confirmed=price_up, source="coinbase")
                     obs_count += 1
                 except Exception:
                     break
 
-            # Exhaustion — large moves in either direction
+            # Exhaustion
             try:
-                if move > 0.0003:
+                if move > 0.0005:
                     engine.observe(f"{ext_id}:exhaustion", confirmed=True, source="coinbase")
-                elif move < 0.00005:
+                elif move < 0.0001:
                     engine.observe(f"{ext_id}:exhaustion", confirmed=False, source="coinbase")
                 obs_count += 1
             except Exception:
                 pass
-
-            # (#3) Graph propagation — signal flows to related coins
-            try:
-                if hasattr(engine, "propagate") and move > 0.0002:
-                    engine.propagate(external_id=ext_id, confidence=0.3 + move * 50, decay=0.4)
-            except Exception:
-                pass
-
-            # (#4) Relative strength — compare coins to each other
-            if trade_count % 100 == 0 and len(prices) >= 2:
-                _update_relative_strength(engine, prices, SYMBOLS_CLEAN)
 
             trade_count += 1
 
