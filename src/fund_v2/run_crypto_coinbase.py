@@ -147,8 +147,8 @@ def run():
     print(f"Ontology: {len(_CRYPTO_ONTOLOGY)} triples (sectors + competition + BTC dominance)")
 
     # Initialize thermodynamic compute
-    from fund_v2.decision_engine import _get_native_handle
-    native = _get_native_handle(engine)
+    from fund_v2.decision_engine import _get_native
+    native = _get_native(engine)
     if native and hasattr(native, 'init_thermo'):
         try:
             native.init_thermo(max_nodes=10000)
