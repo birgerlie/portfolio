@@ -22,8 +22,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict
 
-CRYPTO_PAIRS = ["BTC-USD", "ETH-USD", "SOL-USD"]
-SYMBOLS_CLEAN = ["BTCUSD", "ETHUSD", "SOLUSD"]
+# Core (liquid: 100+ trades/min)
+_CORE = ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD"]
+# Mid (moderate: 5-50 trades/min)
+_MID = ["AVAX-USD", "LINK-USD", "AAVE-USD", "DOGE-USD"]
+# Long tail (thin: 1-5 trades/min, but needed for graph density)
+_TAIL = ["DOT-USD", "UNI-USD", "ADA-USD", "ATOM-USD", "NEAR-USD", "ARB-USD", "MATIC-USD"]
+
+CRYPTO_PAIRS = _CORE + _MID + _TAIL
+SYMBOLS_CLEAN = [c.replace("-", "") for c in CRYPTO_PAIRS]
 SIGNAL_INTERVAL = 60
 
 
@@ -77,6 +84,66 @@ def run():
         except Exception:
             pass
 
+    # Crypto ontology — sector groupings + competition for graph density
+    _CRYPTO_ONTOLOGY = [
+        # Sectors
+        ("BTCUSD", "in_sector", "layer1", 1.0),
+        ("ETHUSD", "in_sector", "layer1", 1.0),
+        ("SOLUSD", "in_sector", "layer1_alt", 1.0),
+        ("AVAXUSD", "in_sector", "layer1_alt", 1.0),
+        ("NEARUSD", "in_sector", "layer1_alt", 1.0),
+        ("ARBUSD", "in_sector", "layer2", 1.0),
+        ("MATICUSD", "in_sector", "layer2", 1.0),
+        ("LINKUSD", "in_sector", "oracle", 1.0),
+        ("AAVEUSD", "in_sector", "defi", 1.0),
+        ("UNIUSD", "in_sector", "defi", 1.0),
+        ("ADAUSD", "in_sector", "layer1_alt", 1.0),
+        ("DOTUSD", "in_sector", "layer1_alt", 1.0),
+        ("ATOMUSD", "in_sector", "interop", 1.0),
+        ("XRPUSD", "in_sector", "payments", 1.0),
+        ("DOGEUSD", "in_sector", "meme", 1.0),
+        # Competition
+        ("SOLUSD", "competes_with", "ETHUSD", 0.8),
+        ("AVAXUSD", "competes_with", "ETHUSD", 0.7),
+        ("AVAXUSD", "competes_with", "SOLUSD", 0.6),
+        ("NEARUSD", "competes_with", "SOLUSD", 0.5),
+        ("MATICUSD", "competes_with", "ARBUSD", 0.8),
+        ("UNIUSD", "competes_with", "AAVEUSD", 0.5),
+        ("ADAUSD", "competes_with", "SOLUSD", 0.4),
+        ("DOTUSD", "competes_with", "ATOMUSD", 0.6),
+        # BTC dominance — everything follows BTC
+        ("BTCUSD", "leads", "ETHUSD", 0.8),
+        ("BTCUSD", "leads", "SOLUSD", 0.6),
+        ("BTCUSD", "leads", "XRPUSD", 0.5),
+        ("BTCUSD", "leads", "layer1_alt", 0.5),
+        ("BTCUSD", "leads", "defi", 0.4),
+        # Sector types
+        ("layer1", "is_a", "sector", 1.0),
+        ("layer1_alt", "is_a", "sector", 1.0),
+        ("layer2", "is_a", "sector", 1.0),
+        ("defi", "is_a", "sector", 1.0),
+        ("oracle", "is_a", "sector", 1.0),
+        ("payments", "is_a", "sector", 1.0),
+        ("meme", "is_a", "sector", 1.0),
+        ("interop", "is_a", "sector", 1.0),
+    ]
+    # Add bidirectional competition
+    extra = []
+    for s, p, o, w in _CRYPTO_ONTOLOGY:
+        if p == "competes_with":
+            extra.append((o, "competes_with", s, w))
+    _CRYPTO_ONTOLOGY.extend(extra)
+
+    for s, p, o, w in _CRYPTO_ONTOLOGY:
+        try:
+            engine.add_triple(f"instrument:{s}" if s in SYMBOLS_CLEAN else s,
+                              p,
+                              f"instrument:{o}" if o in SYMBOLS_CLEAN else o,
+                              weight=w)
+        except Exception:
+            pass
+    print(f"Ontology: {len(_CRYPTO_ONTOLOGY)} triples (sectors + competition + BTC dominance)")
+
     # Coinbase WebSocket
     from fund_v2.sources.coinbase_ws import CoinbaseWebSocket
     event_queue = queue.Queue(maxsize=50000)
@@ -105,6 +172,7 @@ def run():
     start = time.time()
     prices: Dict[str, float] = {}
     prev_prices: Dict[str, float] = {}
+    cost_per_symbol: Dict[str, float] = {s: 10.0 for s in SYMBOLS_CLEAN}  # default 10 bps for crypto
     signal_log = []
 
     def consume():
@@ -165,6 +233,21 @@ def run():
 
             trade_count += 1
 
+            # Handle quote events (best bid/ask from ticker channel)
+            if event.kind == "quote":
+                spread_pct = event.data.get("spread_pct", 0)
+                tight = spread_pct < 0.001  # < 0.1% spread = tight
+                try:
+                    engine.observe(f"{ext_id}:spread_tight", confirmed=tight, source="coinbase")
+                    obs_count += 1
+                except Exception:
+                    pass
+                # Update cost estimate from live spread
+                cost_per_sym = cost_per_symbol.get(sym, 5)
+                live_cost = spread_pct * 10000  # convert to bps
+                cost_per_symbol[sym] = cost_per_sym * 0.9 + live_cost * 0.1  # EMA
+                continue
+
             # Signals on interval
             now = time.time()
             if now - last_signal > SIGNAL_INTERVAL:
@@ -178,7 +261,7 @@ def run():
         decision = generate_decision(
             engine=engine,
             symbols=SYMBOLS_CLEAN,
-            cost_per_symbol={s: 5 for s in SYMBOLS_CLEAN},  # 5 bps default for crypto
+            cost_per_symbol=cost_per_symbol,  # learned from live spreads
         )
         elapsed = time.time() - start
 

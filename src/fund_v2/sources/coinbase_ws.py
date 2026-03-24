@@ -86,11 +86,11 @@ class CoinbaseWebSocket:
         while not self._stop_event.is_set():
             try:
                 async with websockets.connect(WS_URL, ping_interval=30) as ws:
-                    # Subscribe to matches (trades) for our symbols
+                    # Subscribe to trades + ticker (best bid/ask)
                     subscribe = {
                         "type": "subscribe",
                         "product_ids": self._symbols,
-                        "channels": ["matches"],
+                        "channels": ["matches", "ticker"],
                     }
                     await ws.send(json.dumps(subscribe))
                     logger.info("Subscribed to %s on Coinbase", self._symbols)
@@ -106,8 +106,11 @@ class CoinbaseWebSocket:
 
                         try:
                             msg = json.loads(raw)
-                            if msg.get("type") == "match" or msg.get("type") == "last_match":
+                            msg_type = msg.get("type", "")
+                            if msg_type in ("match", "last_match"):
                                 self._handle_trade(msg)
+                            elif msg_type == "ticker":
+                                self._handle_ticker(msg)
                         except Exception as e:
                             logger.debug("Parse error: %s", e)
 
@@ -149,3 +152,36 @@ class CoinbaseWebSocket:
 
         if self.trade_count % 1000 == 0 and self.trade_count > 0:
             logger.info("Coinbase: %d trades received (%d dropped)", self.trade_count, self.dropped_events)
+
+    def _handle_ticker(self, msg: dict):
+        """Convert Coinbase ticker (best bid/ask) to a quote StreamEvent."""
+        product_id = msg.get("product_id", "")
+        symbol = product_id.replace("-", "")
+
+        best_bid = float(msg.get("best_bid", 0))
+        best_ask = float(msg.get("best_ask", 0))
+        price = float(msg.get("price", 0))
+        volume_24h = float(msg.get("volume_24h", 0))
+
+        if best_bid <= 0 or best_ask <= 0:
+            return
+
+        event = StreamEvent(
+            kind="quote",
+            symbol=symbol,
+            data={
+                "bid": best_bid,
+                "ask": best_ask,
+                "spread": best_ask - best_bid,
+                "spread_pct": (best_ask - best_bid) / best_bid,
+                "price": price,
+                "volume_24h": volume_24h,
+            },
+            timestamp=time.time(),
+        )
+
+        if self._queue is not None:
+            try:
+                self._queue.put_nowait(event)
+            except queue.Full:
+                self.dropped_events += 1
