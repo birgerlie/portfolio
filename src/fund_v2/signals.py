@@ -28,11 +28,11 @@ def _regime_weights(regime: Any) -> dict[str, float]:
     mr = float(getattr(regime, "mean_reverting_regime", 0.5))
 
     return {
-        "price_trend_fast": 0.25 + 0.15 * tf,          # primary momentum signal
+        "price_trend_fast": 0.30 + 0.15 * tf,          # primary momentum signal — increased
         "price_trend_slow": 0.20 + 0.10 * tf,          # trend confirmation
-        "relative_strength": 0.15 + 0.15 * tf - 0.05 * mr,
-        "exhaustion": 0.10 + 0.20 * mr - 0.05 * tf,   # contrarian weight
-        "pressure": 0.15 + 0.10 * tf - 0.05 * mr,
+        "relative_strength": 0.10 + 0.10 * tf - 0.05 * mr,
+        "exhaustion": 0.20 + 0.25 * mr - 0.05 * tf,   # (#6) increased contrarian weight
+        "pressure": 0.10 + 0.10 * tf - 0.05 * mr,
         "retail_sentiment": 0.05 + 0.05 * mr,
         "crowded": -(0.10 + 0.05 * tf),                # always negative
     }
@@ -103,6 +103,7 @@ def generate_signals_impl(
     engine: Any,
     regime: Any,
     instruments: list[Any],
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """Generate regime-aware signals for a list of instruments.
 
@@ -132,12 +133,19 @@ def generate_signals_impl(
     """
     weights = _regime_weights(regime)
 
+    # (#1) Minimum edge threshold — don't signal noise
+    min_edge = float(kwargs.get("min_edge", 0.03))
+
     signals = []
     for inst in instruments:
         symbol = getattr(inst, "symbol", None) or str(inst)
         edge, confidence, layers = _score_instrument(inst, engine, weights)
 
-        direction = "long" if edge > 0.01 else "short" if edge < -0.01 else "neutral"
+        # Only signal when edge exceeds minimum (covers transaction costs)
+        if abs(edge) < min_edge:
+            direction = "neutral"
+        else:
+            direction = "long" if edge > 0 else "short"
 
         # Sizing: Kelly-inspired, scaled by confidence, floored at a minimum
         raw_sizing = abs(edge) * confidence
