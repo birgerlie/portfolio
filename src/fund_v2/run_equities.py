@@ -40,28 +40,47 @@ def _load_env():
                 os.environ.setdefault(k.strip(), v.strip())
 
 
-def _strategy(fast, slow, vol, market_trend, win_rate, n_trades):
-    """E_adapt_all: prediction + graph + adaptive."""
-    # Self-awareness
+_last_direction: Dict[str, str] = {}  # symbol → last signal direction
+
+def _strategy(fast, slow, vol, market_trend, win_rate, n_trades, symbol=""):
+    """E_adapt_all: prediction + graph + adaptive.
+
+    When win rate drops below 35%: check if beliefs flipped direction.
+    If yes → reset and trade the new direction (don't freeze).
+    If no → sit out (same direction, still losing).
+    """
+    # Self-awareness with direction-flip override
     if win_rate < 0.35 and n_trades >= 10:
-        return "neutral", 0.0
-    scale = 1.3 if win_rate > 0.55 else (0.2 if win_rate < 0.45 and n_trades >= 10 else 1.0)
+        # Check: has the belief direction flipped?
+        prev_dir = _last_direction.get(symbol)
+        current_dir = "buy" if fast > 0.55 else "sell" if fast < 0.45 else None
+        if prev_dir and current_dir and current_dir != prev_dir:
+            # Direction flipped — beliefs changed, give the new direction a chance
+            scale = 0.5  # cautious size for the flip
+        else:
+            return "neutral", 0.0
+    else:
+        scale = 1.3 if win_rate > 0.55 else (0.2 if win_rate < 0.45 and n_trades >= 10 else 1.0)
 
     # Prediction crash detector
     velocity = fast - slow
     predicted = fast + velocity * 3
     if predicted < 0.25 and vol > 0.02:
+        if symbol: _last_direction[symbol] = "sell"
         return "sell", min(0.15, (0.5 - predicted) * 0.3 + vol) * scale
 
     # Graph early warning
     divergence = fast - market_trend
     if market_trend < 0.40 and divergence > 0.10:
+        if symbol: _last_direction[symbol] = "sell"
         return "sell", min(0.10, divergence * 0.3) * scale
     if market_trend > 0.60 and divergence < -0.10:
+        if symbol: _last_direction[symbol] = "buy"
         return "buy", min(0.10, abs(divergence) * 0.3) * scale
 
     # Recovery
     if vol > 0.02 and fast > slow + 0.05 and slow < 0.45:
+        if symbol: _last_direction[symbol] = "buy"
         return "buy", min(0.08, (fast - slow) * 0.5) * scale
 
     # Trending
@@ -72,10 +91,16 @@ def _strategy(fast, slow, vol, market_trend, win_rate, n_trades):
 
     avg = fast * 0.6 + slow * 0.4
     if avg > 0.55:
-        return "buy", min(0.10, (avg - 0.5) * 0.5 * scale)
+        direction, size = "buy", min(0.10, (avg - 0.5) * 0.5 * scale)
     elif avg < 0.45:
-        return "sell", min(0.10, (0.5 - avg) * 0.5 * scale)
-    return "neutral", 0.0
+        direction, size = "sell", min(0.10, (0.5 - avg) * 0.5 * scale)
+    else:
+        return "neutral", 0.0
+
+    # Track direction for flip detection
+    if symbol and direction != "neutral":
+        _last_direction[symbol] = direction
+    return direction, size
 
 
 def run():
@@ -316,7 +341,7 @@ def run():
             # Rough volatility from belief distance
             vol = abs(fast - slow) * 2
 
-            direction, size = _strategy(fast, slow, vol, spy_fast, win_rate, len(recent_wins))
+            direction, size = _strategy(fast, slow, vol, spy_fast, win_rate, len(recent_wins), symbol=sym)
 
             px = prices.get(sym, 0)
             arrow = "▲" if direction == "buy" else "▼" if direction == "sell" else "—"
