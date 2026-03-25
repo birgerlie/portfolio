@@ -42,6 +42,97 @@ def strategy_simple(beliefs: Dict[str, float], **ctx) -> Tuple[str, float]:
     return "neutral", 0.0
 
 
+def strategy_regime_filtered(beliefs: Dict[str, float], **ctx) -> Tuple[str, float]:
+    """Only trade when regime is trending. Sit out when choppy.
+    Crash detector: high volatility + strong downward momentum = crash → go short hard.
+    """
+    fast = beliefs.get("price_trend_fast", 0.5)
+    slow = beliefs.get("price_trend_slow", 0.5)
+    volatility = ctx.get("volatility", 0)
+
+    # Crash detection: vol > 3% daily AND both trends bearish
+    crash = volatility > 0.03 and fast < 0.35 and slow < 0.40
+    if crash:
+        # Crash mode: sell hard, size proportional to crash severity
+        size = min(0.15, (0.5 - fast) * 0.5 + volatility * 2)
+        return "sell", size
+
+    # Regime detection: are fast and slow agreeing?
+    agreement = 1 - abs((fast - 0.5) - (slow - 0.5)) * 2
+    conviction = abs(fast - 0.5) + abs(slow - 0.5)
+
+    trending = agreement > 0.6 and conviction > 0.15
+
+    if not trending:
+        return "neutral", 0.0
+
+    # High volatility outside crash = reduce size (noisy)
+    vol_scale = max(0.3, 1.0 - volatility * 2) if volatility > 0 else 1.0
+
+    avg = fast * 0.6 + slow * 0.4
+    if avg > 0.55:
+        return "buy", min(0.10, (avg - 0.5) * 0.5 * vol_scale)
+    elif avg < 0.45:
+        return "sell", min(0.10, (0.5 - avg) * 0.5 * vol_scale)
+    return "neutral", 0.0
+
+
+def strategy_regime_crash_v2(beliefs: Dict[str, float], **ctx) -> Tuple[str, float]:
+    """Regime filter with graduated crash response and recovery detection."""
+    fast = beliefs.get("price_trend_fast", 0.5)
+    slow = beliefs.get("price_trend_slow", 0.5)
+    volatility = ctx.get("volatility", 0)
+
+    # Three modes: crash, recovery, normal trending
+
+    # CRASH: high vol + bearish momentum
+    if volatility > 0.025 and fast < 0.35:
+        size = min(0.15, (0.5 - fast) * 0.4 + volatility)
+        return "sell", size
+
+    # RECOVERY: high vol but fast is ABOVE slow (fast recovering while slow still bearish)
+    if volatility > 0.02 and fast > slow + 0.05 and slow < 0.45:
+        # Fast is recovering from crash — early buy signal
+        size = min(0.08, (fast - slow) * 0.5)
+        return "buy", size
+
+    # NORMAL TRENDING: low vol, both agree
+    agreement = 1 - abs((fast - 0.5) - (slow - 0.5)) * 2
+    conviction = abs(fast - 0.5) + abs(slow - 0.5)
+
+    if agreement < 0.6 or conviction < 0.15:
+        return "neutral", 0.0
+
+    avg = fast * 0.6 + slow * 0.4
+    if avg > 0.55:
+        return "buy", min(0.10, (avg - 0.5) * 0.5)
+    elif avg < 0.45:
+        return "sell", min(0.10, (0.5 - avg) * 0.5)
+    return "neutral", 0.0
+
+
+def strategy_regime_strong(beliefs: Dict[str, float], **ctx) -> Tuple[str, float]:
+    """Aggressive regime filter: only trade strong trends, bigger size."""
+    fast = beliefs.get("price_trend_fast", 0.5)
+    slow = beliefs.get("price_trend_slow", 0.5)
+
+    # Both must be on the same side of 0.5, and far from it
+    both_bullish = fast > 0.6 and slow > 0.55
+    both_bearish = fast < 0.4 and slow < 0.45
+
+    if not (both_bullish or both_bearish):
+        return "neutral", 0.0
+
+    avg = fast * 0.6 + slow * 0.4
+    # Bigger size for strong conviction — this is a high-probability setup
+    size = min(0.15, abs(avg - 0.5) * 0.8)
+
+    if both_bullish:
+        return "buy", size
+    else:
+        return "sell", size
+
+
 def strategy_energy_gap(beliefs: Dict[str, float], **ctx) -> Tuple[str, float]:
     """Energy gap: signal when beliefs are far from neutral goal (0.5)."""
     fast = beliefs.get("price_trend_fast", 0.5)
@@ -109,9 +200,10 @@ def strategy_energy_gap_accum(beliefs: Dict[str, float], **ctx) -> Tuple[str, fl
 
 STRATEGIES = {
     "A_simple": strategy_simple,
-    "B_energy_gap": strategy_energy_gap,
-    "C_gap_thermo": strategy_energy_gap_thermo,
-    "D_gap_accum": strategy_energy_gap_accum,
+    "B_regime_filter": strategy_regime_filtered,
+    "C_regime_crash_v2": strategy_regime_crash_v2,
+    "D_energy_gap": strategy_energy_gap,
+    "E_gap_thermo": strategy_energy_gap_thermo,
 }
 
 
@@ -231,6 +323,14 @@ def simulate_period(
             avg_vol = sum(sd.volumes[max(0, day_idx - lookback):day_idx + 1]) / max(1, min(lookback, day_idx + 1))
             exh = abs(fast - 0.5) * 2
 
+            # Volatility: std of recent 10-day returns
+            recent_returns = []
+            for j in range(max(0, day_idx - 10), day_idx):
+                if j > 0 and j < len(sd.closes):
+                    r = (sd.closes[j] - sd.closes[j-1]) / sd.closes[j-1] if sd.closes[j-1] > 0 else 0
+                    recent_returns.append(r)
+            vol = (sum(r**2 for r in recent_returns) / max(len(recent_returns), 1)) ** 0.5 if recent_returns else 0
+
             beliefs = {
                 "price_trend_fast": fast,
                 "price_trend_slow": slow,
@@ -240,7 +340,7 @@ def simulate_period(
             }
 
             # Run strategy
-            direction, size = strategy_fn(beliefs, cost_bps=cost_bps)
+            direction, size = strategy_fn(beliefs, cost_bps=cost_bps, volatility=vol)
 
             if direction == "neutral" or size < 0.005:
                 continue
