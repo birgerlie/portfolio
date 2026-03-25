@@ -198,11 +198,37 @@ def strategy_energy_gap_accum(beliefs: Dict[str, float], **ctx) -> Tuple[str, fl
     return direction, min(0.10, size)
 
 
+def strategy_adaptive(beliefs: Dict[str, float], **ctx) -> Tuple[str, float]:
+    """Crash_v2 + self-awareness: tracks own win rate, stops when losing.
+
+    Uses a rolling window of recent trade outcomes. When win rate drops
+    below 45%, reduce size to 20%. When below 35%, stop entirely.
+    When above 55%, increase size by 30%.
+    """
+    # Get rolling win rate from context
+    recent_wins = ctx.get("recent_wins", [])
+    win_rate = sum(recent_wins) / len(recent_wins) if len(recent_wins) >= 5 else 0.5
+
+    # Self-awareness: am I in a regime where I work?
+    if win_rate < 0.35 and len(recent_wins) >= 10:
+        return "neutral", 0.0  # I'm losing — stop trading
+    elif win_rate < 0.45 and len(recent_wins) >= 10:
+        scale = 0.2  # barely trading
+    elif win_rate > 0.55:
+        scale = 1.3  # I'm winning — press
+    else:
+        scale = 1.0
+
+    # Use crash_v2 logic for direction
+    direction, size = strategy_regime_crash_v2(beliefs, **ctx)
+    return direction, min(0.15, size * scale)
+
+
 STRATEGIES = {
     "A_simple": strategy_simple,
     "B_regime_filter": strategy_regime_filtered,
     "C_regime_crash_v2": strategy_regime_crash_v2,
-    "D_energy_gap": strategy_energy_gap,
+    "D_adaptive": strategy_adaptive,
     "E_gap_thermo": strategy_energy_gap_thermo,
 }
 
@@ -301,6 +327,9 @@ def simulate_period(
     n = len(ref.dates)
     lookback = 20
 
+    # Rolling win rate for adaptive strategy
+    recent_wins: List[float] = []  # 1.0 for win, 0.0 for loss
+
     # Simulate day by day
     for day_idx in range(lookback, n - forward_days):
         for symbol, sd in data.items():
@@ -339,8 +368,11 @@ def simulate_period(
                 "pressure": 0.5,
             }
 
-            # Run strategy
-            direction, size = strategy_fn(beliefs, cost_bps=cost_bps, volatility=vol)
+            # Run strategy (pass rolling win rate for adaptive)
+            direction, size = strategy_fn(
+                beliefs, cost_bps=cost_bps, volatility=vol,
+                recent_wins=recent_wins[-20:],  # last 20 trades
+            )
 
             if direction == "neutral" or size < 0.005:
                 continue
@@ -353,7 +385,7 @@ def simulate_period(
             else:
                 net_return = fwd_return - cost
 
-            result.trades.append(TradeResult(
+            trade = TradeResult(
                 date=ref.dates[day_idx],
                 symbol=symbol,
                 direction=direction,
@@ -362,7 +394,9 @@ def simulate_period(
                 exit_price=fwd_close,
                 return_pct=net_return,
                 correct=net_return > 0,
-            ))
+            )
+            result.trades.append(trade)
+            recent_wins.append(1.0 if net_return > 0 else 0.0)
 
     return result
 
