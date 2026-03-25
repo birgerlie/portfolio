@@ -224,12 +224,148 @@ def strategy_adaptive(beliefs: Dict[str, float], **ctx) -> Tuple[str, float]:
     return direction, min(0.15, size * scale)
 
 
+def strategy_adaptive_prediction(beliefs: Dict[str, float], **ctx) -> Tuple[str, float]:
+    """Adaptive + prediction engine as crash detector.
+
+    Instead of threshold-based crash detection (vol > 2.5% AND fast < 0.35),
+    use the prediction: if fast_trend is predicted to drop 15%+ in 3 days,
+    go short now.
+    """
+    fast = beliefs.get("price_trend_fast", 0.5)
+    slow = beliefs.get("price_trend_slow", 0.5)
+    volatility = ctx.get("volatility", 0)
+    recent_wins = ctx.get("recent_wins", [])
+
+    # Self-awareness
+    win_rate = sum(recent_wins) / len(recent_wins) if len(recent_wins) >= 5 else 0.5
+    if win_rate < 0.35 and len(recent_wins) >= 10:
+        return "neutral", 0.0
+    scale = 1.3 if win_rate > 0.55 else (0.2 if win_rate < 0.45 and len(recent_wins) >= 10 else 1.0)
+
+    # Prediction-based crash detector:
+    # Estimate where fast_trend is heading based on velocity (fast - slow)
+    velocity = fast - slow  # positive = accelerating up, negative = accelerating down
+    predicted_fast = fast + velocity * 3  # 3-day projection
+
+    if predicted_fast < 0.25 and volatility > 0.02:
+        # Predicted crash — short hard
+        size = min(0.15, (0.5 - predicted_fast) * 0.3 + volatility) * scale
+        return "sell", size
+
+    if predicted_fast > 0.70 and fast > slow:
+        # Predicted ramp — buy
+        size = min(0.10, (predicted_fast - 0.5) * 0.3) * scale
+        return "buy", size
+
+    # Recovery: fast recovering above slow after a dip
+    if volatility > 0.02 and fast > slow + 0.05 and slow < 0.45:
+        size = min(0.08, (fast - slow) * 0.5) * scale
+        return "buy", size
+
+    # Normal trending (same as before)
+    agreement = 1 - abs((fast - 0.5) - (slow - 0.5)) * 2
+    conviction = abs(fast - 0.5) + abs(slow - 0.5)
+    if agreement < 0.6 or conviction < 0.15:
+        return "neutral", 0.0
+
+    avg = fast * 0.6 + slow * 0.4
+    if avg > 0.55:
+        return "buy", min(0.10, (avg - 0.5) * 0.5 * scale)
+    elif avg < 0.45:
+        return "sell", min(0.10, (0.5 - avg) * 0.5 * scale)
+    return "neutral", 0.0
+
+
+def strategy_adaptive_graph(beliefs: Dict[str, float], **ctx) -> Tuple[str, float]:
+    """Adaptive + graph pressure as early warning.
+
+    Uses macro proxy pressure (derived from SPY/QQQ/TLT relative moves)
+    as leading indicator. If the "market" is falling but this stock hasn't
+    yet, expect it to follow → short early.
+    """
+    fast = beliefs.get("price_trend_fast", 0.5)
+    slow = beliefs.get("price_trend_slow", 0.5)
+    volatility = ctx.get("volatility", 0)
+    market_trend = ctx.get("market_trend", 0.5)  # SPY's fast trend
+    recent_wins = ctx.get("recent_wins", [])
+
+    # Self-awareness
+    win_rate = sum(recent_wins) / len(recent_wins) if len(recent_wins) >= 5 else 0.5
+    if win_rate < 0.35 and len(recent_wins) >= 10:
+        return "neutral", 0.0
+    scale = 1.3 if win_rate > 0.55 else (0.2 if win_rate < 0.45 and len(recent_wins) >= 10 else 1.0)
+
+    # Graph early warning: market falling but this stock hasn't dropped yet
+    market_divergence = fast - market_trend  # positive = this stock is holding up
+    if market_trend < 0.40 and market_divergence > 0.10:
+        # Market is down, this stock hasn't followed → it will (sell early)
+        size = min(0.10, market_divergence * 0.3) * scale
+        return "sell", size
+
+    if market_trend > 0.60 and market_divergence < -0.10:
+        # Market is up, this stock is lagging → it will catch up (buy)
+        size = min(0.10, abs(market_divergence) * 0.3) * scale
+        return "buy", size
+
+    # Fall through to crash_v2 + adaptive logic
+    return strategy_adaptive(beliefs, **ctx)
+
+
+def strategy_adaptive_all(beliefs: Dict[str, float], **ctx) -> Tuple[str, float]:
+    """All three: adaptive + prediction + graph + crash detection."""
+    fast = beliefs.get("price_trend_fast", 0.5)
+    slow = beliefs.get("price_trend_slow", 0.5)
+    volatility = ctx.get("volatility", 0)
+    market_trend = ctx.get("market_trend", 0.5)
+    recent_wins = ctx.get("recent_wins", [])
+
+    # Self-awareness
+    win_rate = sum(recent_wins) / len(recent_wins) if len(recent_wins) >= 5 else 0.5
+    if win_rate < 0.35 and len(recent_wins) >= 10:
+        return "neutral", 0.0
+    scale = 1.3 if win_rate > 0.55 else (0.2 if win_rate < 0.45 and len(recent_wins) >= 10 else 1.0)
+
+    # Layer 1: Prediction crash detector
+    velocity = fast - slow
+    predicted_fast = fast + velocity * 3
+    if predicted_fast < 0.25 and volatility > 0.02:
+        size = min(0.15, (0.5 - predicted_fast) * 0.3 + volatility) * scale
+        return "sell", size
+
+    # Layer 2: Graph early warning
+    market_divergence = fast - market_trend
+    if market_trend < 0.40 and market_divergence > 0.10:
+        size = min(0.10, market_divergence * 0.3) * scale
+        return "sell", size
+    if market_trend > 0.60 and market_divergence < -0.10:
+        size = min(0.10, abs(market_divergence) * 0.3) * scale
+        return "buy", size
+
+    # Layer 3: Recovery detection
+    if volatility > 0.02 and fast > slow + 0.05 and slow < 0.45:
+        size = min(0.08, (fast - slow) * 0.5) * scale
+        return "buy", size
+
+    # Layer 4: Normal trending
+    agreement = 1 - abs((fast - 0.5) - (slow - 0.5)) * 2
+    conviction = abs(fast - 0.5) + abs(slow - 0.5)
+    if agreement < 0.6 or conviction < 0.15:
+        return "neutral", 0.0
+
+    avg = fast * 0.6 + slow * 0.4
+    if avg > 0.55:
+        return "buy", min(0.10, (avg - 0.5) * 0.5 * scale)
+    elif avg < 0.45:
+        return "sell", min(0.10, (0.5 - avg) * 0.5 * scale)
+    return "neutral", 0.0
+
+
 STRATEGIES = {
     "A_simple": strategy_simple,
-    "B_regime_filter": strategy_regime_filtered,
-    "C_regime_crash_v2": strategy_regime_crash_v2,
-    "D_adaptive": strategy_adaptive,
-    "E_gap_thermo": strategy_energy_gap_thermo,
+    "B_adaptive": strategy_adaptive,
+    "C_adapt_predict": strategy_adaptive_prediction,
+    "D_adapt_graph": strategy_adaptive_graph,
+    "E_adapt_all": strategy_adaptive_all,
 }
 
 
@@ -330,6 +466,9 @@ def simulate_period(
     # Rolling win rate for adaptive strategy
     recent_wins: List[float] = []  # 1.0 for win, 0.0 for loss
 
+    # Pre-compute SPY trend for graph early warning
+    spy = data.get("SPY") or data.get("QQQ")
+
     # Simulate day by day
     for day_idx in range(lookback, n - forward_days):
         for symbol, sd in data.items():
@@ -368,10 +507,18 @@ def simulate_period(
                 "pressure": 0.5,
             }
 
-            # Run strategy (pass rolling win rate for adaptive)
+            # Compute market trend (SPY's fast trend) for graph strategies
+            mkt_trend = 0.5
+            if spy and day_idx < len(spy.closes):
+                spy_fast_start = max(0, day_idx - 5)
+                spy_ret = (spy.closes[day_idx] - spy.closes[spy_fast_start]) / spy.closes[spy_fast_start] if spy.closes[spy_fast_start] > 0 else 0
+                mkt_trend = max(0, min(1, 0.5 + spy_ret * 10))
+
+            # Run strategy
             direction, size = strategy_fn(
                 beliefs, cost_bps=cost_bps, volatility=vol,
-                recent_wins=recent_wins[-20:],  # last 20 trades
+                recent_wins=recent_wins[-20:],
+                market_trend=mkt_trend,
             )
 
             if direction == "neutral" or size < 0.005:
