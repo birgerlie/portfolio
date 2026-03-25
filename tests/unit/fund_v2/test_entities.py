@@ -129,7 +129,10 @@ def test_macro_factor_has_current_alert():
 # ── Accumulators ────────────────────────────────────────────────────────
 
 def test_instrument_has_accumulators():
-    assert "trade_pressure" in Instrument._accumulators
+    assert "buy_pressure_fast" in Instrument._accumulators
+    assert "sell_pressure_fast" in Instrument._accumulators
+    assert "buy_pressure_slow" in Instrument._accumulators
+    assert "sell_pressure_slow" in Instrument._accumulators
 
 
 # ── Relationships ───────────────────────────────────────────────────────

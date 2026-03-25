@@ -305,6 +305,17 @@ def run():
             except Exception:
                 pass
 
+            # Push directional pressure to accumulators (volume-weighted)
+            trade_size = event.data.get("size", 0)
+            weight = max(0.01, float(trade_size) if trade_size else 0.01)
+            acc_prefix = f"Instrument.{'buy' if price_up else 'sell'}_pressure"
+            try:
+                if hasattr(engine, "accumulator_push"):
+                    engine.accumulator_push(f"{acc_prefix}_fast", sym, weight)
+                    engine.accumulator_push(f"{acc_prefix}_slow", sym, weight)
+            except Exception:
+                pass
+
             trade_count += 1
 
             # Handle quote events (best bid/ask from ticker channel)

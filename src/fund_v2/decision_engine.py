@@ -290,8 +290,112 @@ def compute_energy_gaps(
         _prev_fe[symbol] = curr_symbol_fe
         _prev_beliefs[symbol] = curr_symbol_beliefs
 
+    # ── Accumulator-based signals (fast timing layer) ──────────────
+    _add_accumulator_signals(engine, symbols, gaps, doc_ids or {})
+
     gaps.sort(key=lambda g: g.free_energy, reverse=True)
     return gaps
+
+
+def _add_accumulator_signals(
+    engine: Any,
+    symbols: List[str],
+    gaps: List[EnergyGap],
+    doc_ids: Dict[str, int],
+):
+    """Read directional pressure accumulators and generate timing signals.
+
+    Accumulators respond in seconds (not minutes like beliefs).
+    Cross-speed divergence = the alpha:
+      buy_fast > sell_fast BUT buy_slow < sell_slow → fade the bounce (sell)
+      sell_fast > buy_fast BUT buy_slow > sell_slow → buy the dip
+    """
+    native = _get_native(engine)
+
+    for symbol in symbols:
+        did = doc_ids.get(symbol, -1)
+
+        # Read accumulator temperatures
+        buy_fast = buy_slow = sell_fast = sell_slow = 0.0
+        try:
+            if hasattr(engine, "accumulator_temperature"):
+                bf = engine.accumulator_temperature("Instrument.buy_pressure_fast", symbol)
+                sf = engine.accumulator_temperature("Instrument.sell_pressure_fast", symbol)
+                bs = engine.accumulator_temperature("Instrument.buy_pressure_slow", symbol)
+                ss = engine.accumulator_temperature("Instrument.sell_pressure_slow", symbol)
+                buy_fast = bf.get("temperature", 0) if isinstance(bf, dict) and bf else 0
+                sell_fast = sf.get("temperature", 0) if isinstance(sf, dict) and sf else 0
+                buy_slow = bs.get("temperature", 0) if isinstance(bs, dict) and bs else 0
+                sell_slow = ss.get("temperature", 0) if isinstance(ss, dict) and ss else 0
+        except Exception:
+            continue
+
+        total_fast = buy_fast + sell_fast
+        total_slow = buy_slow + sell_slow
+
+        if total_fast < 0.01 and total_slow < 0.01:
+            continue  # no pressure data yet
+
+        # Compute ratios (0=all sell, 0.5=balanced, 1=all buy)
+        ratio_fast = buy_fast / total_fast if total_fast > 0.01 else 0.5
+        ratio_slow = buy_slow / total_slow if total_slow > 0.01 else 0.5
+
+        # Read node thermo for velocity/phase
+        node_vel = 0.0
+        node_phase = "stable"
+        if native and did >= 0:
+            try:
+                nt = native.node_thermo(did)
+                if nt:
+                    node_vel = getattr(nt, "velocity", 0) if not isinstance(nt, dict) else nt.get("velocity", 0)
+                    phase = getattr(nt, "phase_state", "stable") if not isinstance(nt, dict) else nt.get("phase_state", "stable")
+                    node_phase = phase.value if hasattr(phase, "value") else str(phase)
+            except Exception:
+                pass
+
+        # Cross-speed divergence signals
+        # Fast bounce in slow downtrend → fade it (sell)
+        if ratio_fast > 0.6 and ratio_slow < 0.4:
+            fe = (ratio_fast - 0.5) * (0.5 - ratio_slow) * 2  # divergence strength
+            if fe > 0.02:
+                gaps.append(EnergyGap(
+                    symbol=symbol, belief_name="pressure_divergence",
+                    current=round(ratio_fast, 4), goal=round(ratio_slow, 4),
+                    free_energy=round(fe, 4), velocity=round(node_vel, 4),
+                    phase=node_phase, direction="fade_bounce", action="sell",
+                ))
+
+        # Fast dip in slow uptrend → buy the dip
+        elif ratio_fast < 0.4 and ratio_slow > 0.6:
+            fe = (0.5 - ratio_fast) * (ratio_slow - 0.5) * 2
+            if fe > 0.02:
+                gaps.append(EnergyGap(
+                    symbol=symbol, belief_name="pressure_divergence",
+                    current=round(ratio_fast, 4), goal=round(ratio_slow, 4),
+                    free_energy=round(fe, 4), velocity=round(node_vel, 4),
+                    phase=node_phase, direction="buy_dip", action="buy",
+                ))
+
+        # Strong agreement: both fast and slow same direction
+        elif ratio_fast > 0.65 and ratio_slow > 0.6:
+            fe = (ratio_fast - 0.5) * (ratio_slow - 0.5) * 2
+            if fe > 0.02:
+                gaps.append(EnergyGap(
+                    symbol=symbol, belief_name="pressure_agreement",
+                    current=round(ratio_fast, 4), goal=0.5,
+                    free_energy=round(fe, 4), velocity=round(node_vel, 4),
+                    phase=node_phase, direction="momentum_buy", action="buy",
+                ))
+
+        elif ratio_fast < 0.35 and ratio_slow < 0.4:
+            fe = (0.5 - ratio_fast) * (0.5 - ratio_slow) * 2
+            if fe > 0.02:
+                gaps.append(EnergyGap(
+                    symbol=symbol, belief_name="pressure_agreement",
+                    current=round(ratio_fast, 4), goal=0.5,
+                    free_energy=round(fe, 4), velocity=round(node_vel, 4),
+                    phase=node_phase, direction="momentum_sell", action="sell",
+                ))
 
 
 # ── Graph correlation structure ──────────────────────────────────────────────

@@ -65,8 +65,13 @@ class Instrument(Entity):
         goal=0.2,  # goal: we want exit_ready to be LOW (not exiting)
     )
 
-    # Accumulators
-    trade_pressure = Accumulator(preset="beliefChanges")
+    # Accumulators — directional pressure at two speeds
+    # Fast (10s): who's winning RIGHT NOW
+    buy_pressure_fast = Accumulator(decay_rate=0.1, window_seconds=10, warm_at=0.2, cooldown=1.0)
+    sell_pressure_fast = Accumulator(decay_rate=0.1, window_seconds=10, warm_at=0.2, cooldown=1.0)
+    # Slow (5min): sustained trend direction
+    buy_pressure_slow = Accumulator(decay_rate=0.005, window_seconds=300, warm_at=0.1, cooldown=10.0)
+    sell_pressure_slow = Accumulator(decay_rate=0.005, window_seconds=300, warm_at=0.1, cooldown=10.0)
 
     # Alerts — current
     volatility_spike = Alert(trigger="volume_normal", threshold=0.2, above=False, severity="high", cooldown=300)
