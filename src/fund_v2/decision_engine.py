@@ -331,6 +331,7 @@ def _compute_sizes(
     temperature_scalar: float,
     max_position: float = 0.15,
     max_sector_exposure: float = 0.40,
+    **kwargs,
 ) -> tuple[List[EnergyGap], Dict[str, float]]:
     """Size positions from free energy, adjusted for correlation and sector limits.
 
@@ -402,17 +403,36 @@ def _compute_sizes(
             elif abs(g.velocity) > 0.005:
                 size *= 0.5  # velocity opposes → reduce 50%
 
-        # (#3) Stale signal decay: exponential — same action repeated = less informative
-        # After 5 identical cycles: 0.5^5 = 3% of original → effectively zero
-        prev_action = _prev_actions.get(g.symbol, {})
-        prev_act = prev_action.get("action")
-        prev_count = prev_action.get("count", 0)
+        # Outcome-aware decay: reinforce correct signals, decay incorrect ones
+        prev_info = _prev_actions.get(g.symbol, {})
+        prev_act = prev_info.get("action")
+        prev_count = prev_info.get("count", 0)
+        prev_price = prev_info.get("price", 0)
+        current_price = kwargs.get("prices", {}).get(g.symbol, 0)
+
         if prev_act == g.action:
             stale_count = prev_count + 1
-            size *= 0.8 ** min(stale_count, 8)  # 20% decay per cycle, floor at 0.8^8 = 17%
+
+            # Check if the signal has been correct since first emitted
+            if prev_price > 0 and current_price > 0:
+                price_moved_right = (
+                    (g.action in ("sell", "reduce", "exit") and current_price < prev_price) or
+                    (g.action in ("buy", "add") and current_price > prev_price)
+                )
+                if price_moved_right:
+                    # Signal is correct — reinforce, don't decay
+                    size *= min(1.2, 1.0 + stale_count * 0.05)  # slight boost, cap at 20%
+                else:
+                    # Signal is wrong — decay aggressively
+                    size *= 0.6 ** min(stale_count, 5)  # fast decay for wrong signals
+            else:
+                # No price data — mild decay
+                size *= 0.85 ** min(stale_count, 8)
         else:
-            stale_count = 0  # action changed — reset
-        _prev_actions[g.symbol] = {"action": g.action, "count": stale_count}
+            stale_count = 0
+            prev_price = current_price  # reset price anchor on direction change
+
+        _prev_actions[g.symbol] = {"action": g.action, "count": stale_count, "price": prev_price or current_price}
 
         if size < 0.005:
             size = 0.0
@@ -501,6 +521,7 @@ def generate_decision(
     # Size positions with graph correlation + hedging + crowd scalar
     sized_gaps, sector_exposure = _compute_sizes(
         all_gaps, temperature_scalar * crowd_scalar,
+        prices=kwargs.get("prices", {}),
     )
 
     return Decision(

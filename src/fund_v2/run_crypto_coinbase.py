@@ -337,6 +337,7 @@ def run():
             symbols=SYMBOLS_CLEAN,
             doc_ids=_doc_ids,
             cost_per_symbol=cost_per_symbol,
+            prices=dict(prices),
         )
         elapsed = time.time() - start
 
