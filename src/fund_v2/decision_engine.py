@@ -312,6 +312,34 @@ def _add_accumulator_signals(
     """
     native = _get_native(engine)
 
+    # First pass: collect all ratios to compute market average
+    all_ratios_fast: Dict[str, float] = {}
+    all_ratios_slow: Dict[str, float] = {}
+    for symbol in symbols:
+        try:
+            if hasattr(engine, "accumulator_temperature"):
+                bf = engine.accumulator_temperature("Instrument.buy_pressure_fast", symbol)
+                sf = engine.accumulator_temperature("Instrument.sell_pressure_fast", symbol)
+                bs = engine.accumulator_temperature("Instrument.buy_pressure_slow", symbol)
+                ss = engine.accumulator_temperature("Instrument.sell_pressure_slow", symbol)
+                bf_t = bf.get("temperature", 0) if isinstance(bf, dict) and bf else 0
+                sf_t = sf.get("temperature", 0) if isinstance(sf, dict) and sf else 0
+                bs_t = bs.get("temperature", 0) if isinstance(bs, dict) and bs else 0
+                ss_t = ss.get("temperature", 0) if isinstance(ss, dict) and ss else 0
+                tf = bf_t + sf_t
+                ts = bs_t + ss_t
+                if tf > 0.01:
+                    all_ratios_fast[symbol] = bf_t / tf
+                if ts > 0.01:
+                    all_ratios_slow[symbol] = bs_t / ts
+        except Exception:
+            pass
+
+    # Market average ratio (what's the "normal" direction right now)
+    mkt_fast = sum(all_ratios_fast.values()) / max(len(all_ratios_fast), 1) if all_ratios_fast else 0.5
+    mkt_slow = sum(all_ratios_slow.values()) / max(len(all_ratios_slow), 1) if all_ratios_slow else 0.5
+
+    # Second pass: generate signals including cross-instrument divergence
     for symbol in symbols:
         did = doc_ids.get(symbol, -1)
 
@@ -376,6 +404,27 @@ def _add_accumulator_signals(
                     phase=node_phase, direction="buy_dip", action="buy",
                 ))
 
+        # Fast pressure reversal: fast flipped but slow hasn't caught up
+        # This is the bounce detector — fast responds in 10s, slow in 5min
+        if ratio_fast > 0.55 and ratio_slow < 0.4:  # fast turning buy, slow still sell
+            fe = (ratio_fast - 0.5) * (0.5 - ratio_slow) * 3  # amplify early reversals
+            if fe > 0.02:
+                gaps.append(EnergyGap(
+                    symbol=symbol, belief_name="pressure_reversal",
+                    current=round(ratio_fast, 4), goal=round(ratio_slow, 4),
+                    free_energy=round(fe, 4), velocity=round(node_vel, 4),
+                    phase=node_phase, direction="early_reversal_up", action="buy",
+                ))
+        elif ratio_fast < 0.45 and ratio_slow > 0.6:  # fast turning sell, slow still buy
+            fe = (0.5 - ratio_fast) * (ratio_slow - 0.5) * 3
+            if fe > 0.02:
+                gaps.append(EnergyGap(
+                    symbol=symbol, belief_name="pressure_reversal",
+                    current=round(ratio_fast, 4), goal=round(ratio_slow, 4),
+                    free_energy=round(fe, 4), velocity=round(node_vel, 4),
+                    phase=node_phase, direction="early_reversal_down", action="sell",
+                ))
+
         # Strong agreement: both fast and slow same direction
         elif ratio_fast > 0.65 and ratio_slow > 0.6:
             fe = (ratio_fast - 0.5) * (ratio_slow - 0.5) * 2
@@ -395,6 +444,30 @@ def _add_accumulator_signals(
                     current=round(ratio_fast, 4), goal=0.5,
                     free_energy=round(fe, 4), velocity=round(node_vel, 4),
                     phase=node_phase, direction="momentum_sell", action="sell",
+                ))
+
+        # Cross-instrument divergence: this instrument vs the market
+        # If market is selling but this instrument's buy pressure is rising → relative strength
+        sym_fast = all_ratios_fast.get(symbol, 0.5)
+        if sym_fast > mkt_fast + 0.15 and mkt_fast < 0.45:
+            # This instrument is holding up while market sells → buy signal
+            fe = (sym_fast - mkt_fast) * 2
+            if fe > 0.03:
+                gaps.append(EnergyGap(
+                    symbol=symbol, belief_name="cross_instrument_divergence",
+                    current=round(sym_fast, 4), goal=round(mkt_fast, 4),
+                    free_energy=round(fe, 4), velocity=round(node_vel, 4),
+                    phase=node_phase, direction="relative_strength", action="buy",
+                ))
+        elif sym_fast < mkt_fast - 0.15 and mkt_fast > 0.55:
+            # Market buying but this instrument isn't → relative weakness
+            fe = (mkt_fast - sym_fast) * 2
+            if fe > 0.03:
+                gaps.append(EnergyGap(
+                    symbol=symbol, belief_name="cross_instrument_divergence",
+                    current=round(sym_fast, 4), goal=round(mkt_fast, 4),
+                    free_energy=round(fe, 4), velocity=round(node_vel, 4),
+                    phase=node_phase, direction="relative_weakness", action="sell",
                 ))
 
 
